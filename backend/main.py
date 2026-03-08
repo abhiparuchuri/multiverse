@@ -119,9 +119,11 @@ async def upload_csv(file: UploadFile = File(...)):
 
     sessions[session_id] = {
         "df": df,
+        "df_original": df.copy(),
         "profile": profile,
         "chat_history": chat_messages,
         "intent": None,
+        "modifications": [],
     }
 
     return {
@@ -145,9 +147,80 @@ def _parse_variable_edits(response: str) -> tuple[str, list[dict]]:
         return response, []
 
 
-def _apply_variable_edits(session: dict, edits: list[dict]) -> None:
-    """Apply variable edits to session profile and dataframe."""
+def _parse_data_transform(response: str) -> tuple[str, Optional[dict]]:
+    """Extract data_transform JSON block from LLM response. Returns (clean_response, transform)."""
+    pattern = r"```data_transform\s*\n(.*?)\n```"
+    match = re.search(pattern, response, re.DOTALL)
+    if not match:
+        return response, None
+    try:
+        transform = json.loads(match.group(1).strip())
+        clean_response = response[:match.start()].rstrip()
+        return clean_response, transform
+    except (json.JSONDecodeError, TypeError):
+        return response, None
+
+
+# Allowlist of safe names for transform execution
+_TRANSFORM_SAFE_BUILTINS = {
+    "abs": abs, "len": len, "min": min, "max": max,
+    "round": round, "int": int, "float": float, "str": str,
+    "bool": bool, "list": list, "dict": dict, "tuple": tuple,
+    "range": range, "enumerate": enumerate, "zip": zip,
+    "sorted": sorted, "sum": sum, "any": any, "all": all,
+    "True": True, "False": False, "None": None,
+}
+
+
+def _execute_transform(df: pd.DataFrame, code: str) -> pd.DataFrame:
+    """Execute a pandas transform code string safely. Returns the modified df."""
+    safe_globals = {
+        "__builtins__": _TRANSFORM_SAFE_BUILTINS,
+        "pd": pd,
+        "np": np,
+        "stats": stats,
+        "df": df.copy(),
+    }
+    exec(code, safe_globals)
+    result = safe_globals["df"]
+    if not isinstance(result, pd.DataFrame):
+        raise ValueError("Transform code must assign result to 'df'")
+    return result
+
+
+def _apply_transform(session: dict, transform: dict) -> Optional[dict]:
+    """Apply a data transform to the session. Returns the modification record or None on failure."""
+    import time
+    code = transform.get("code", "")
+    description = transform.get("description", "Data transformation")
+    if not code:
+        return None
+    try:
+        new_df = _execute_transform(session["df"], code)
+        session["df"] = new_df
+        session["profile"] = profile_dataframe(new_df)
+        mod = {
+            "type": "transform",
+            "variable": "",
+            "from": description,
+            "to": f"{len(new_df)} rows",
+            "source": "ai",
+            "timestamp": time.time(),
+            "code": code,
+            "description": description,
+        }
+        session.setdefault("modifications", []).append(mod)
+        return mod
+    except Exception as e:
+        print(f"Transform execution failed: {e}")
+        return None
+
+
+def _apply_variable_edits(session: dict, edits: list[dict], source: str = "ai") -> list[dict]:
+    """Apply variable edits to session profile and dataframe. Returns list of modification records."""
+    import time
     profile = session["profile"]
+    new_mods = []
     for edit in edits:
         original_name = edit.get("original_name")
         updates = edit.get("updates", {})
@@ -158,10 +231,17 @@ def _apply_variable_edits(session: dict, edits: list[dict]) -> None:
                 new_name = updates.get("name", col["name"])
                 if new_name != col["name"]:
                     session["df"] = session["df"].rename(columns={col["name"]: new_name})
+                    mod = {"type": "rename", "variable": new_name, "from": col["name"], "to": new_name, "source": source, "timestamp": time.time()}
+                    new_mods.append(mod)
                     col["name"] = new_name
                 if "distribution" in updates:
+                    old_dist = col.get("distribution", col["dtype"])
                     col["distribution"] = updates["distribution"]
+                    mod = {"type": "retype", "variable": col["name"], "from": old_dist, "to": updates["distribution"], "source": source, "timestamp": time.time()}
+                    new_mods.append(mod)
                 break
+    session.setdefault("modifications", []).extend(new_mods)
+    return new_mods
 
 
 @app.post("/chat")
@@ -179,16 +259,26 @@ async def chat(request: ChatRequest):
 
     # Parse and apply any variable edits from the LLM response
     clean_response, edits = _parse_variable_edits(response)
+    new_mods = []
     if edits:
-        _apply_variable_edits(session, edits)
+        new_mods = _apply_variable_edits(session, edits, source="ai")
+
+    # Parse and apply any data transforms from the LLM response
+    clean_response, transform = _parse_data_transform(clean_response)
+    if transform:
+        transform_mod = _apply_transform(session, transform)
+        if transform_mod:
+            new_mods.append(transform_mod)
 
     session["chat_history"].append({"role": "user", "content": request.message})
     session["chat_history"].append({"role": "assistant", "content": clean_response})
 
     result = {"response": clean_response}
-    if edits:
+    if edits or transform:
         result["profile_updated"] = True
         result["profile"] = session["profile"]
+    if new_mods:
+        result["modifications"] = new_mods
     return result
 
 
@@ -218,6 +308,58 @@ async def update_variable(request: UpdateVariableRequest):
             break
 
     return {"status": "updated", "profile": profile}
+
+
+class RevertModificationRequest(BaseModel):
+    session_id: str
+    timestamp: float
+
+
+@app.post("/revert-modification")
+async def revert_modification(request: RevertModificationRequest):
+    """Revert a specific modification by timestamp. Rebuilds state from original df."""
+    session = sessions.get(request.session_id)
+    if not session:
+        return {"error": "Session not found"}
+
+    mods = session.get("modifications", [])
+    # Remove the targeted modification
+    remaining = [m for m in mods if m["timestamp"] != request.timestamp]
+    session["modifications"] = remaining
+
+    # Rebuild from original dataframe
+    session["df"] = session["df_original"].copy()
+    profile = profile_dataframe(session["df"])
+
+    # Replay remaining modifications in order
+    for mod in remaining:
+        if mod["type"] == "rename":
+            old_name = mod["from"]
+            new_name = mod["to"]
+            if old_name in session["df"].columns:
+                session["df"] = session["df"].rename(columns={old_name: new_name})
+                for col in profile["column_profiles"]:
+                    if col["name"] == old_name:
+                        col["name"] = new_name
+                        break
+        elif mod["type"] == "retype":
+            for col in profile["column_profiles"]:
+                if col["name"] == mod["variable"]:
+                    col["distribution"] = mod["to"]
+                    break
+        elif mod["type"] == "transform" and mod.get("code"):
+            try:
+                session["df"] = _execute_transform(session["df"], mod["code"])
+                profile = profile_dataframe(session["df"])
+            except Exception:
+                pass  # Skip failed transforms on replay
+
+    session["profile"] = profile
+    return {
+        "status": "reverted",
+        "profile": profile,
+        "modifications": remaining,
+    }
 
 
 @app.post("/intent-chat")

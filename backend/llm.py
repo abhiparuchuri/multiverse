@@ -58,6 +58,7 @@ Your job:
 - Help them understand which variables are suitable as outcomes vs. predictors vs. confounders
 - If they ask about renaming variables, suggest clear, human-readable names
 - If they mention concerns about their data, validate or challenge those concerns with evidence from the profile
+- **Apply data modifications when the researcher asks** — filtering rows, removing outliers, log-transforming variables, standardizing columns, creating new columns, dropping columns, imputing missing values, etc.
 
 When you recommend or agree to rename a variable or change its type, you MUST include a JSON block at the END of your response to apply the changes. Format:
 ```variable_edits
@@ -65,6 +66,23 @@ When you recommend or agree to rename a variable or change its type, you MUST in
 ```
 Only include the fields that are changing in "updates". Valid distribution values: "continuous", "binary", "count/ordinal", "categorical".
 Only include this block when you are making concrete changes, not when merely discussing possibilities.
+
+When the researcher asks you to modify, filter, or transform the data, you MUST include a data_transform block at the END of your response (after any variable_edits block if both apply). Format:
+```data_transform
+{"description": "Short human-readable description of what this does", "code": "df = df[df['age'] > 18]"}
+```
+Rules for the code field:
+- The variable `df` is a pandas DataFrame. Your code must read from `df` and assign the result back to `df`.
+- You may use pandas, numpy (imported as `np`), and scipy.stats (imported as `stats`). No other imports.
+- Write the code as a single expression or a short sequence of statements separated by semicolons or newlines.
+- Examples:
+  - Filter: `df = df[df['age'] >= 18]`
+  - Remove outliers: `df = df[(np.abs(stats.zscore(df['bmi'].dropna())) < 3).reindex(df.index, fill_value=True)]`
+  - Log transform: `df['log_income'] = np.log1p(df['income'])`
+  - Standardize: `df['age_z'] = (df['age'] - df['age'].mean()) / df['age'].std()`
+  - Drop column: `df = df.drop(columns=['unnecessary_col'])`
+  - Impute missing: `df['bmi'] = df['bmi'].fillna(df['bmi'].median())`
+- ONLY include this block when the researcher explicitly asks for or agrees to a data modification. Do NOT include it when merely discussing possibilities.
 
 Do NOT:
 - Tell them what their hypothesis should be (that's the next stage)
@@ -174,6 +192,7 @@ def generate_data_profile_chat(profile: dict) -> list[dict]:
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=1200,
+            temperature=0.5,
             system=system,
             messages=[{"role": "user", "content": user_prompt}],
         )

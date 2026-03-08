@@ -36,6 +36,21 @@ export async function updateVariable(
   return res.json();
 }
 
+export async function revertModification(
+  sessionId: string,
+  timestamp: number
+) {
+  const res = await fetch(`${API_BASE}/revert-modification`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId,
+      timestamp,
+    }),
+  });
+  return res.json();
+}
+
 export async function sendIntentChat(
   sessionId: string,
   message: string,

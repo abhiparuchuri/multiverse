@@ -65,6 +65,17 @@ export interface AnalysisResults {
   regressions: RegressionResult[];
 }
 
+export interface DataModification {
+  type: "rename" | "retype" | "transform";
+  variable: string;
+  from: string;
+  to: string;
+  source: "user" | "ai";
+  timestamp: number;
+  description?: string;
+  code?: string;
+}
+
 export interface AppState {
   phase: Phase;
   setPhase: (phase: Phase) => void;
@@ -80,6 +91,9 @@ export interface AppState {
   setResults: (results: AnalysisResults) => void;
   columns: string[];
   setColumns: (columns: string[]) => void;
+  modifications: DataModification[];
+  setModifications: (mods: DataModification[]) => void;
+  addModification: (mod: DataModification) => void;
 }
 
 export const AppContext = createContext<AppState | null>(null);

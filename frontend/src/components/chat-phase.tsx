@@ -1,17 +1,20 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { useAppState, ChatMessage, ColumnProfile } from "@/lib/store";
-import { sendChatMessage, updateVariable } from "@/lib/api";
+import { useAppState, ChatMessage, ColumnProfile, DataModification } from "@/lib/store";
+import { sendChatMessage, updateVariable, revertModification } from "@/lib/api";
 import {
   Send,
   Loader2,
   ArrowRight,
-  Pencil,
-  Check,
-  X,
   AlertTriangle,
   ChevronRight,
+  X,
+  ArrowLeftRight,
+  Type,
+  Sparkles,
+  User,
+  Filter,
 } from "lucide-react";
 import { Markdown } from "@/components/markdown";
 
@@ -19,6 +22,45 @@ const TYPE_OPTIONS = ["continuous", "binary", "count/ordinal", "categorical"];
 const PANEL_MIN = 240;
 const PANEL_MAX = 600;
 const PANEL_DEFAULT = 360;
+const CHAR_PX = 8;
+const VARIABLE_TABLE_MIN_WIDTH = 460;
+
+function clampPanelWidth(width: number): number {
+  return Math.min(PANEL_MAX, Math.max(PANEL_MIN, Math.round(width)));
+}
+
+function estimatePanelWidth(
+  dataProfile: { column_profiles: ColumnProfile[] } | null,
+  modifications: DataModification[]
+): number {
+  if (!dataProfile) return PANEL_DEFAULT;
+
+  // Fixed columns (type/dist/missing/skew + paddings/borders) in the variable table.
+  const fixedVariableColumns = 230;
+  const longestVarName = dataProfile.column_profiles.reduce(
+    (maxLen, col) => Math.max(maxLen, (col.name || "").length),
+    0
+  );
+  const nameColumnWidth = Math.max(90, longestVarName * CHAR_PX + 28);
+  const variableTabWidth = Math.max(
+    VARIABLE_TABLE_MIN_WIDTH,
+    fixedVariableColumns + nameColumnWidth
+  );
+
+  // Modifications tab can have longer labels (rename/retype/transform descriptions).
+  const longestModificationLabel = modifications.reduce((maxLen, mod) => {
+    const label =
+      mod.type === "transform"
+        ? mod.description || mod.from || ""
+        : `${mod.from || ""} -> ${mod.to || ""}`;
+    return Math.max(maxLen, label.length);
+  }, 0);
+  const modificationsTabWidth = longestModificationLabel
+    ? 70 + longestModificationLabel * CHAR_PX
+    : PANEL_MIN;
+
+  return clampPanelWidth(Math.max(variableTabWidth, modificationsTabWidth));
+}
 
 function DistributionBar({ profile }: { profile: ColumnProfile }) {
   const bins = profile.histogram;
@@ -47,59 +89,52 @@ function VariableRow({
   sessionId: string;
   onUpdate: (name: string, updates: Partial<ColumnProfile>) => void;
 }) {
-  const [editing, setEditing] = useState(false);
+  const [editingName, setEditingName] = useState(false);
   const [editName, setEditName] = useState(profile.name);
-  const [editType, setEditType] = useState(profile.distribution || "continuous");
 
-  const handleSave = () => {
-    const updates: Partial<ColumnProfile> = {};
-    if (editName !== profile.name) updates.name = editName;
-    if (editType !== profile.distribution) updates.distribution = editType;
-    if (Object.keys(updates).length > 0) {
-      onUpdate(profile.name, updates);
-      updateVariable(sessionId, profile.name, updates).catch(() => {});
+  const commitName = () => {
+    const trimmed = editName.trim();
+    if (trimmed && trimmed !== profile.name) {
+      onUpdate(profile.name, { name: trimmed });
+      updateVariable(sessionId, profile.name, { name: trimmed }).catch(() => {});
+    } else {
+      setEditName(profile.name);
     }
-    setEditing(false);
-  };
-
-  const handleCancel = () => {
-    setEditName(profile.name);
-    setEditType(profile.distribution || "continuous");
-    setEditing(false);
+    setEditingName(false);
   };
 
   return (
     <tr className="border-b border-border last:border-0 hover:bg-accent/30 transition-colors text-xs">
       <td className="px-3 py-2">
-        {editing ? (
+        {editingName ? (
           <input
             value={editName}
             onChange={(e) => setEditName(e.target.value)}
+            onBlur={commitName}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitName();
+              if (e.key === "Escape") {
+                setEditName(profile.name);
+                setEditingName(false);
+              }
+            }}
             className="bg-background border border-border rounded px-2 py-1 text-xs w-full focus:outline-none focus:ring-1 focus:ring-ring"
             autoFocus
           />
         ) : (
-          <span className="font-medium">{profile.name}</span>
+          <span
+            className="font-medium cursor-text hover:text-foreground/70 transition-colors"
+            onClick={() => setEditingName(true)}
+            title="Click to rename"
+          >
+            {profile.name}
+          </span>
         )}
       </td>
       <td className="px-3 py-2">
-        {editing ? (
-          <select
-            value={editType}
-            onChange={(e) => setEditType(e.target.value)}
-            className="bg-background border border-border rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
-          >
-            {TYPE_OPTIONS.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <span className="text-muted-foreground">
-            {profile.distribution || profile.dtype}
-          </span>
-        )}
+        <span className="text-muted-foreground">
+          {profile.distribution || profile.dtype}
+        </span>
       </td>
       <td className="px-3 py-2 text-center">
         <DistributionBar profile={profile} />
@@ -112,34 +147,67 @@ function VariableRow({
           <AlertTriangle className="w-3 h-3 text-warning inline" />
         )}
       </td>
-      <td className="px-3 py-2 text-right">
-        {editing ? (
-          <div className="flex gap-1 justify-end">
-            <button
-              onClick={handleSave}
-              className="p-1 rounded hover:bg-accent text-success"
-            >
-              <Check className="w-3 h-3" />
-            </button>
-            <button
-              onClick={handleCancel}
-              className="p-1 rounded hover:bg-accent text-muted-foreground"
-            >
-              <X className="w-3 h-3" />
-            </button>
-          </div>
-        ) : (
-          <button
-            onClick={() => setEditing(true)}
-            className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground"
-          >
-            <Pencil className="w-3 h-3" />
-          </button>
-        )}
-      </td>
     </tr>
   );
 }
+
+function ModificationRow({
+  mod,
+  onRevert,
+}: {
+  mod: DataModification;
+  onRevert: (mod: DataModification) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 border-b border-border last:border-0 hover:bg-accent/30 transition-colors text-xs group">
+      <div className="flex-shrink-0">
+        {mod.type === "rename" ? (
+          <ArrowLeftRight className="w-3 h-3 text-info" />
+        ) : mod.type === "transform" ? (
+          <Filter className="w-3 h-3 text-success" />
+        ) : (
+          <Type className="w-3 h-3 text-warning" />
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        {mod.type === "transform" ? (
+          <>
+            <p className="font-medium leading-snug break-words">
+              {mod.description || mod.from}
+            </p>
+            <p className="text-[10px] text-muted-foreground mt-0.5">
+              → {mod.to}
+            </p>
+          </>
+        ) : (
+          <p className="font-medium leading-snug break-words">
+            {mod.type === "rename" ? "Renamed" : "Retyped"}{" "}
+            <span className="text-muted-foreground">{mod.from}</span>
+            {" → "}
+            <span>{mod.to}</span>
+          </p>
+        )}
+        <p className="text-[10px] text-muted-foreground flex items-center gap-1 mt-0.5">
+          {mod.source === "ai" ? (
+            <Sparkles className="w-2.5 h-2.5" />
+          ) : (
+            <User className="w-2.5 h-2.5" />
+          )}
+          {mod.source === "ai" ? "AI suggested" : "Manual"}
+        </p>
+      </div>
+      <button
+        onClick={() => onRevert(mod)}
+        className="p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors opacity-0 group-hover:opacity-100 flex-shrink-0"
+        title="Revert this change"
+      >
+        <X className="w-3 h-3" />
+      </button>
+    </div>
+  );
+}
+
+type PanelTab = "variables" | "modifications";
 
 export function ChatPhase() {
   const {
@@ -152,13 +220,19 @@ export function ChatPhase() {
     completedPhases,
     setCompletedPhases,
     setColumns,
+    modifications,
+    setModifications,
+    addModification,
   } = useAppState();
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [panelWidth, setPanelWidth] = useState(PANEL_DEFAULT);
+  const [panelTab, setPanelTab] = useState<PanelTab>("variables");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
+  const hasManuallyResized = useRef(false);
+  const lastAutoWidth = useRef<number | null>(null);
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(0);
 
@@ -176,6 +250,7 @@ export function ChatPhase() {
 
       const onMove = (ev: MouseEvent) => {
         if (!dragging.current) return;
+        hasManuallyResized.current = true;
         const delta = dragStartX.current - ev.clientX; // dragging left increases width
         const next = Math.min(
           PANEL_MAX,
@@ -194,6 +269,15 @@ export function ChatPhase() {
     [panelWidth]
   );
 
+  useEffect(() => {
+    if (!dataProfile || hasManuallyResized.current) return;
+    const autoWidth = estimatePanelWidth(dataProfile, modifications);
+    if (autoWidth !== lastAutoWidth.current) {
+      setPanelWidth(autoWidth);
+      lastAutoWidth.current = autoWidth;
+    }
+  }, [dataProfile, modifications]);
+
   const handleSend = async () => {
     if (!input.trim() || !sessionId || loading) return;
     const userMsg: ChatMessage = { role: "user", content: input.trim() };
@@ -211,6 +295,11 @@ export function ChatPhase() {
       if (data.profile_updated && data.profile) {
         setDataProfile(data.profile);
         setColumns(data.profile.column_profiles.map((c: ColumnProfile) => c.name));
+      }
+      if (data.modifications) {
+        for (const mod of data.modifications) {
+          addModification(mod as DataModification);
+        }
       }
     } catch {
       setChatMessages([
@@ -242,6 +331,35 @@ export function ChatPhase() {
     const newProfile = { ...dataProfile, column_profiles: updatedProfiles };
     setDataProfile(newProfile);
     setColumns(updatedProfiles.map((c) => c.name));
+
+    if (updates.name && updates.name !== originalName) {
+      addModification({
+        type: "rename",
+        variable: updates.name,
+        from: originalName,
+        to: updates.name,
+        source: "user",
+        timestamp: Date.now() / 1000,
+      });
+    }
+  };
+
+  const handleRevertModification = async (mod: DataModification) => {
+    if (!sessionId) return;
+    try {
+      const data = await revertModification(sessionId, mod.timestamp);
+      if (data.profile) {
+        setDataProfile(data.profile);
+        setColumns(data.profile.column_profiles.map((c: ColumnProfile) => c.name));
+      }
+      if (data.modifications) {
+        setModifications(data.modifications as DataModification[]);
+      } else {
+        setModifications([]);
+      }
+    } catch {
+      // silently fail
+    }
   };
 
   return (
@@ -342,51 +460,98 @@ export function ChatPhase() {
             >
               {!collapsed && (
                 <>
-                  {/* Panel header */}
-                  <div className="px-4 py-3 border-b border-border flex items-center justify-between flex-shrink-0">
-                    <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                        Variables
-                      </p>
-                      <p className="text-xs text-muted-foreground mt-0.5">
+                  {/* Panel header with tabs */}
+                  <div className="border-b border-border flex-shrink-0">
+                    <div className="flex items-center justify-between px-4 pt-3 pb-0">
+                      <p className="text-xs text-muted-foreground">
                         {dataProfile.rows.toLocaleString()} rows &middot;{" "}
                         {dataProfile.columns} cols &middot;{" "}
                         {dataProfile.missing_total_pct}% missing
                       </p>
+                      <button
+                        onClick={() => setCollapsed(true)}
+                        className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                        title="Collapse panel"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
                     </div>
-                    <button
-                      onClick={() => setCollapsed(true)}
-                      className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-                      title="Collapse panel"
-                    >
-                      <ChevronRight className="w-4 h-4" />
-                    </button>
+                    <div className="flex px-4 mt-2 gap-1">
+                      <button
+                        onClick={() => setPanelTab("variables")}
+                        className={`px-3 py-1.5 text-[11px] font-medium rounded-t transition-colors border-b-2 ${
+                          panelTab === "variables"
+                            ? "border-foreground text-foreground"
+                            : "border-transparent text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        Variables
+                      </button>
+                      <button
+                        onClick={() => setPanelTab("modifications")}
+                        className={`px-3 py-1.5 text-[11px] font-medium rounded-t transition-colors border-b-2 flex items-center gap-1.5 ${
+                          panelTab === "modifications"
+                            ? "border-foreground text-foreground"
+                            : "border-transparent text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        Modifications
+                        {modifications.length > 0 && (
+                          <span className="bg-foreground text-background text-[9px] font-bold rounded-full w-4 h-4 flex items-center justify-center">
+                            {modifications.length}
+                          </span>
+                        )}
+                      </button>
+                    </div>
                   </div>
 
-                  {/* Table */}
+                  {/* Tab content */}
                   <div className="flex-1 overflow-y-auto">
-                    <table className="w-full">
-                      <thead>
-                        <tr className="border-b border-border bg-accent/30 text-[10px] uppercase tracking-wider text-muted-foreground">
-                          <th className="text-left px-3 py-2 font-medium">Name</th>
-                          <th className="text-left px-3 py-2 font-medium">Type</th>
-                          <th className="text-center px-3 py-2 font-medium">Dist</th>
-                          <th className="text-right px-3 py-2 font-medium">Miss</th>
-                          <th className="text-center px-3 py-2 font-medium">Skew</th>
-                          <th className="text-right px-3 py-2 font-medium">Edit</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {dataProfile.column_profiles.map((col) => (
-                          <VariableRow
-                            key={col.name}
-                            profile={col}
-                            sessionId={sessionId!}
-                            onUpdate={handleVariableUpdate}
+                    {panelTab === "variables" ? (
+                      <div className="overflow-x-auto">
+                        <table className="w-full min-w-[460px]">
+                          <thead>
+                            <tr className="border-b border-border bg-accent/30 text-[10px] uppercase tracking-wider text-muted-foreground">
+                              <th className="text-left px-3 py-2 font-medium">Name</th>
+                              <th className="text-left px-3 py-2 font-medium">Type</th>
+                              <th className="text-center px-3 py-2 font-medium">Dist</th>
+                              <th className="text-right px-3 py-2 font-medium">Miss</th>
+                              <th className="text-center px-3 py-2 font-medium">Skew</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {dataProfile.column_profiles.map((col) => (
+                              <VariableRow
+                                key={col.name}
+                                profile={col}
+                                sessionId={sessionId!}
+                                onUpdate={handleVariableUpdate}
+                              />
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : modifications.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center h-full text-center px-6 py-12">
+                        <Sparkles className="w-5 h-5 text-muted-foreground/40 mb-2" />
+                        <p className="text-xs text-muted-foreground">
+                          No modifications yet
+                        </p>
+                        <p className="text-[10px] text-muted-foreground/60 mt-1">
+                          Changes to variables and data will appear here
+                        </p>
+                      </div>
+                    ) : (
+                      <div>
+                        {modifications.map((mod) => (
+                          <ModificationRow
+                            key={mod.timestamp}
+                            mod={mod}
+                            onRevert={handleRevertModification}
                           />
                         ))}
-                      </tbody>
-                    </table>
+                      </div>
+                    )}
                   </div>
                 </>
               )}
