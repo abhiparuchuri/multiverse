@@ -53,6 +53,46 @@ export interface RegressionResult {
   assumption_details: Record<string, unknown>;
 }
 
+export interface ClassifierResult {
+  spec_id: string;
+  classifier: string;
+  features: string[];
+  predictors_used: string[];
+  covariates_used: string[];
+  accuracy: number;
+  accuracy_std: number;
+  auc: number | null;
+  auc_std: number | null;
+  precision: number | null;
+  recall: number | null;
+  feature_importance: Record<string, number>;
+  n_obs: number;
+  n_features: number;
+}
+
+export interface ClassifierSummary {
+  total_specs?: number;
+  best_classifier?: string | null;
+  best_accuracy?: number | null;
+  mean_accuracy?: number;
+  mean_auc?: number | null;
+}
+
+export interface DistributionStat {
+  variable: string;
+  role: "outcome" | "predictor" | "covariate";
+  n: number;
+  missing: number;
+  missing_pct: number;
+  unique: number;
+  mean?: number;
+  std?: number;
+  min?: number;
+  max?: number;
+  median?: number;
+  skewness?: number;
+}
+
 export interface AnalysisResults {
   session_id: string;
   robustness_pct: number;
@@ -63,6 +103,13 @@ export interface AnalysisResults {
   outcome_type: string;
   regressions: RegressionResult[];
   plot_map?: Record<string, string>;
+  classifier_results?: ClassifierResult[];
+  classifier_summary?: ClassifierSummary;
+  classifier_plot_map?: Record<string, string>;
+  dag_map?: Record<string, string>;
+  classifier_dag_map?: Record<string, string>;
+  distribution_plot_map?: Record<string, string>;
+  distribution_stats?: DistributionStat[];
 }
 
 export interface DataModification {

@@ -43,10 +43,7 @@ plt.rcParams.update({
     "figure.facecolor": COLOR_BG,
     "axes.facecolor": COLOR_BG,
     "axes.edgecolor": COLOR_GRID,
-    "axes.grid": True,
-    "grid.color": COLOR_GRID,
-    "grid.linewidth": 0.5,
-    "grid.alpha": 0.8,
+    "axes.grid": False,
     "text.color": COLOR_TEXT,
     "axes.labelcolor": COLOR_AXIS,
     "xtick.color": COLOR_AXIS,
@@ -275,6 +272,258 @@ def generate_spec_curve_plot(regressions: list[dict], outcome: str, outcome_type
     return filename
 
 
+def generate_feature_importance_plot(classifier_result: dict) -> str:
+    """Generate a horizontal bar chart of feature importances for a classifier.
+    Returns the filename."""
+    fi = classifier_result["feature_importance"]
+    clf_name = classifier_result["classifier"]
+    features = classifier_result.get("features", list(fi.keys()))
+
+    # Sort by importance
+    sorted_items = sorted(fi.items(), key=lambda x: x[1], reverse=True)
+    names = [item[0] for item in sorted_items]
+    values = [item[1] for item in sorted_items]
+
+    n_features = len(names)
+    fig_height = max(1.8, 0.35 * n_features + 0.8)
+    fig, ax = plt.subplots(figsize=(5.5, fig_height))
+
+    y_pos = np.arange(n_features)
+    colors = [COLOR_SIG if v == max(values) else "#64748b" for v in values]
+
+    ax.barh(y_pos, values, height=0.6, color=colors, edgecolor="none", alpha=0.85)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(names, fontsize=9)
+    ax.invert_yaxis()
+    ax.set_xlabel("Importance", fontsize=9, labelpad=6)
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.spines["bottom"].set_color(COLOR_GRID)
+    ax.tick_params(axis="y", length=0)
+
+    acc = classifier_result.get("accuracy", 0)
+    auc = classifier_result.get("auc")
+    stats_parts = [f"Accuracy: {acc:.1%}"]
+    if auc is not None:
+        stats_parts.append(f"AUC: {auc:.3f}")
+    stats_parts.append(f"n = {classifier_result.get('n_obs', '?')}")
+
+    ax.set_title(clf_name, fontsize=11, fontweight="600", pad=20, loc="left", color=COLOR_TEXT)
+    ax.text(0.0, 1.02, "  |  ".join(stats_parts),
+            transform=ax.transAxes, fontsize=8, color=COLOR_SUBTITLE, va="bottom")
+
+    filename = f"{classifier_result['spec_id']}.png"
+    filepath = PLOT_DIR / filename
+    fig.savefig(filepath, facecolor=COLOR_BG, edgecolor="none")
+    plt.close(fig)
+    return filename
+
+
+def generate_distribution_plot(df: pd.DataFrame, col_name: str, role: str) -> str:
+    """Generate a distribution plot for a single variable.
+    role is 'outcome', 'predictor', or 'covariate'.
+    Returns the filename."""
+    data = df[col_name].dropna()
+    if len(data) == 0:
+        raise ValueError(f"No data for {col_name}")
+
+    is_numeric = np.issubdtype(data.dtype, np.number)
+    n_unique = data.nunique()
+    is_binary = is_numeric and n_unique <= 2
+
+    role_colors = {
+        "outcome": "#8b5cf6",
+        "predictor": COLOR_SIG,
+        "covariate": "#64748b",
+    }
+    color = role_colors.get(role, "#64748b")
+
+    fig, ax = plt.subplots(figsize=(5.5, 3.0))
+
+    if is_binary:
+        counts = data.value_counts().sort_index()
+        ax.bar(counts.index.astype(str), counts.values, color=color, alpha=0.8,
+               width=0.5, edgecolor="none")
+        ax.set_ylabel("Count", fontsize=9, labelpad=8)
+    elif is_numeric:
+        n_bins = min(30, max(10, int(np.sqrt(len(data)))))
+        ax.hist(data.values, bins=n_bins, color=color, alpha=0.7, edgecolor="white",
+                linewidth=0.5)
+        ax.set_ylabel("Frequency", fontsize=9, labelpad=8)
+        # Add KDE overlay
+        try:
+            from scipy.stats import gaussian_kde
+            kde_x = np.linspace(float(data.min()), float(data.max()), 200)
+            kde = gaussian_kde(data.values)
+            kde_y = kde(kde_x)
+            ax2 = ax.twinx()
+            ax2.plot(kde_x, kde_y, color=color, linewidth=1.5, alpha=0.9)
+            ax2.set_yticks([])
+            ax2.spines["top"].set_visible(False)
+            ax2.spines["right"].set_visible(False)
+        except Exception:
+            pass
+    else:
+        # Categorical
+        counts = data.value_counts().head(15)
+        ax.barh(range(len(counts)), counts.values, color=color, alpha=0.8,
+                height=0.6, edgecolor="none")
+        ax.set_yticks(range(len(counts)))
+        ax.set_yticklabels(counts.index.astype(str), fontsize=8)
+        ax.invert_yaxis()
+        ax.set_xlabel("Count", fontsize=9, labelpad=6)
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color(COLOR_GRID)
+    ax.spines["bottom"].set_color(COLOR_GRID)
+
+    # Stats line
+    stats_parts = [f"n = {len(data)}"]
+    if is_numeric and not is_binary:
+        stats_parts.extend([
+            f"mean = {data.mean():.2f}",
+            f"std = {data.std():.2f}",
+            f"median = {data.median():.2f}",
+        ])
+        skew = data.skew()
+        if abs(skew) > 1:
+            stats_parts.append(f"skew = {skew:.2f}")
+    elif is_binary:
+        pct = data.mean() * 100
+        stats_parts.append(f"{pct:.1f}% positive")
+    else:
+        stats_parts.append(f"{n_unique} categories")
+    missing_pct = df[col_name].isna().mean() * 100
+    if missing_pct > 0:
+        stats_parts.append(f"{missing_pct:.1f}% missing")
+
+    role_label = role.capitalize()
+    ax.set_title(col_name, fontsize=11, fontweight="600", pad=20, loc="left", color=COLOR_TEXT)
+    ax.text(0.0, 1.08, "  |  ".join(stats_parts),
+            transform=ax.transAxes, fontsize=8, color=COLOR_SUBTITLE, va="bottom")
+    ax.text(0.0, 1.02, role_label,
+            transform=ax.transAxes, fontsize=8, color=color, va="bottom", fontweight="600")
+
+    filename = f"dist_{col_name}.png"
+    filepath = PLOT_DIR / filename
+    fig.savefig(filepath, facecolor=COLOR_BG, edgecolor="none")
+    plt.close(fig)
+    return filename
+
+
+def generate_dag_plot(
+    outcome: str,
+    predictors: list[str],
+    covariates: list[str],
+    spec_id: str,
+) -> str:
+    """Generate a publication-ready DAG showing predictor→outcome and covariate→outcome
+    relationships for a single analysis specification. Returns the filename."""
+    from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+
+    all_left = predictors + covariates
+    n_left = len(all_left)
+
+    # Layout parameters
+    node_w, node_h = 2.0, 0.5
+    gap_y = 0.85
+    left_x = 0.0
+    right_x = 5.5
+    total_h = max(2.0, (n_left - 1) * gap_y + node_h + 1.0)
+    fig_w = 8.0
+    fig_h = max(2.0, total_h + 0.8)
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    ax.set_xlim(-0.8, right_x + node_w + 0.8)
+    ax.set_ylim(-0.4, total_h + 0.4)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    # Compute Y positions for left-side nodes (centered vertically)
+    left_ys = []
+    if n_left > 0:
+        block_h = (n_left - 1) * gap_y
+        start_y = (total_h - block_h) / 2
+        for i in range(n_left):
+            left_ys.append(start_y + i * gap_y)
+        left_ys.reverse()
+
+    # Outcome node (right side, centered)
+    outcome_cy = total_h / 2
+    outcome_rect = FancyBboxPatch(
+        (right_x, outcome_cy - node_h / 2), node_w, node_h,
+        boxstyle="round,pad=0.1", facecolor="#8b5cf6", edgecolor="#7c3aed",
+        linewidth=1.5, alpha=0.9, zorder=3,
+    )
+    ax.add_patch(outcome_rect)
+    ax.text(
+        right_x + node_w / 2, outcome_cy, outcome,
+        ha="center", va="center", fontsize=9, fontweight="600",
+        color="white", zorder=4,
+    )
+
+    # Draw left-side nodes and arrows
+    for i, (var, y) in enumerate(zip(all_left, left_ys)):
+        is_predictor = var in predictors
+        face = "#16a34a" if is_predictor else "#64748b"
+        edge = "#15803d" if is_predictor else "#475569"
+
+        rect = FancyBboxPatch(
+            (left_x, y - node_h / 2), node_w, node_h,
+            boxstyle="round,pad=0.1", facecolor=face, edgecolor=edge,
+            linewidth=1.5, alpha=0.9, zorder=3,
+        )
+        ax.add_patch(rect)
+        ax.text(
+            left_x + node_w / 2, y, var,
+            ha="center", va="center", fontsize=9, fontweight="600",
+            color="white", zorder=4,
+        )
+
+        # Arrow from left node to outcome
+        arrow_color = "#16a34a" if is_predictor else "#94a3b8"
+        arrow_style = "->" if is_predictor else "->"
+        lw = 1.8 if is_predictor else 1.2
+        arrow = FancyArrowPatch(
+            (left_x + node_w + 0.05, y),
+            (right_x - 0.05, outcome_cy),
+            arrowstyle="-|>",
+            mutation_scale=14,
+            color=arrow_color,
+            linewidth=lw,
+            linestyle="-" if is_predictor else "--",
+            zorder=2,
+            connectionstyle="arc3,rad=0",
+        )
+        ax.add_patch(arrow)
+
+    # Legend
+    from matplotlib.lines import Line2D
+    legend_items = [
+        Line2D([0], [0], marker="s", color="w", markerfacecolor="#16a34a",
+               markersize=8, label="Predictor"),
+        Line2D([0], [0], marker="s", color="w", markerfacecolor="#64748b",
+               markersize=8, label="Covariate"),
+        Line2D([0], [0], marker="s", color="w", markerfacecolor="#8b5cf6",
+               markersize=8, label="Outcome"),
+    ]
+    ax.legend(
+        handles=legend_items, loc="lower center", fontsize=8,
+        frameon=True, fancybox=True, framealpha=0.9,
+        edgecolor=COLOR_GRID, ncol=3,
+        bbox_to_anchor=(0.5, -0.02),
+    )
+
+    filename = f"dag_{spec_id}.png"
+    filepath = PLOT_DIR / filename
+    fig.savefig(filepath, facecolor=COLOR_BG, edgecolor="none")
+    plt.close(fig)
+    return filename
+
+
 def generate_all_plots(results: dict, df: Optional[pd.DataFrame] = None) -> dict:
     """Generate all plots for the analysis results.
     Returns a dict mapping spec_id -> plot filename, plus 'spec_curve' key."""
@@ -300,6 +549,20 @@ def generate_all_plots(results: dict, df: Optional[pd.DataFrame] = None) -> dict
             except Exception as e2:
                 print(f"Plot generation failed for {reg['spec_id']}: {e} / fallback: {e2}")
 
+    # DAG plots for each regression
+    dag_map = {}
+    for reg in results.get("regressions", []):
+        try:
+            dag_file = generate_dag_plot(
+                outcome=reg["outcome"],
+                predictors=[reg["predictor"]],
+                covariates=reg.get("covariates", []),
+                spec_id=reg["spec_id"],
+            )
+            dag_map[reg["spec_id"]] = dag_file
+        except Exception as e:
+            print(f"DAG generation failed for {reg['spec_id']}: {e}")
+
     # Specification curve
     try:
         spec_curve = generate_spec_curve_plot(
@@ -311,4 +574,4 @@ def generate_all_plots(results: dict, df: Optional[pd.DataFrame] = None) -> dict
     except Exception as e:
         print(f"Spec curve generation failed: {e}")
 
-    return plot_map
+    return plot_map, dag_map

@@ -18,8 +18,9 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from analysis_engine import run_multiverse_analysis
+from classifier_engine import run_classifiers
 from llm import generate_data_profile_chat, generate_chat_response, generate_intent_chat, extract_intent_from_conversation, stream_results_chat, stream_intent_chat, stream_chat_response
-from plot_generator import generate_all_plots, PLOT_DIR
+from plot_generator import generate_all_plots, generate_feature_importance_plot, generate_distribution_plot, generate_dag_plot, PLOT_DIR
 
 app = FastAPI(title="Multiverse API")
 
@@ -723,13 +724,123 @@ async def analyze(request: AnalyzeRequest):
         session["results"] = results
         results["session_id"] = request.session_id
 
-        # Generate publication-ready plots
+        # Generate publication-ready regression plots + DAGs
         try:
-            plot_map = generate_all_plots(results, df=session["df"])
+            plot_map, dag_map = generate_all_plots(results, df=session["df"])
             results["plot_map"] = plot_map
+            results["dag_map"] = dag_map
         except Exception as plot_err:
             print(f"Plot generation failed: {plot_err}")
             results["plot_map"] = {}
+            results["dag_map"] = {}
+
+        # Run classifiers (for binary outcomes)
+        outcome_type = results.get("outcome_type", "continuous")
+        if outcome_type == "binary":
+            try:
+                clf_results = run_classifiers(
+                    df=df,
+                    outcome=intent["outcome_variable"],
+                    predictors=intent["predictors"],
+                    confounders=intent["confounders"],
+                )
+                results["classifier_results"] = clf_results.get("classifier_results", [])
+                results["classifier_summary"] = {
+                    "total_specs": clf_results.get("total_specs", 0),
+                    "best_classifier": clf_results.get("best_classifier"),
+                    "best_accuracy": clf_results.get("best_accuracy"),
+                    "mean_accuracy": clf_results.get("mean_accuracy"),
+                    "mean_auc": clf_results.get("mean_auc"),
+                }
+
+                # Generate feature importance plots
+                clf_plot_map = {}
+                for cr in results["classifier_results"]:
+                    try:
+                        fname = generate_feature_importance_plot(cr)
+                        clf_plot_map[cr["spec_id"]] = fname
+                    except Exception as e:
+                        print(f"Classifier plot failed: {e}")
+                results["classifier_plot_map"] = clf_plot_map
+
+                # Generate DAG plots for each classifier spec
+                clf_dag_map = {}
+                for cr in results["classifier_results"]:
+                    try:
+                        dag_fname = generate_dag_plot(
+                            outcome=intent["outcome_variable"],
+                            predictors=cr.get("predictors_used", []),
+                            covariates=cr.get("covariates_used", []),
+                            spec_id=f"clf_{cr['spec_id']}",
+                        )
+                        clf_dag_map[cr["spec_id"]] = dag_fname
+                    except Exception as e:
+                        print(f"Classifier DAG failed: {e}")
+                results["classifier_dag_map"] = clf_dag_map
+            except Exception as clf_err:
+                print(f"Classifier analysis failed: {clf_err}")
+                results["classifier_results"] = []
+                results["classifier_summary"] = {}
+                results["classifier_plot_map"] = {}
+                results["classifier_dag_map"] = {}
+        else:
+            results["classifier_results"] = []
+            results["classifier_summary"] = {}
+            results["classifier_plot_map"] = {}
+            results["classifier_dag_map"] = {}
+
+        # Generate distribution plots for all analysis variables
+        try:
+            dist_plot_map = {}
+            outcome_var = intent["outcome_variable"]
+            dist_plot_map[outcome_var] = generate_distribution_plot(df, outcome_var, "outcome")
+
+            for p in intent["predictors"]:
+                if p in df.columns:
+                    dist_plot_map[p] = generate_distribution_plot(df, p, "predictor")
+
+            for c in intent["confounders"]:
+                if c in df.columns and c not in dist_plot_map:
+                    dist_plot_map[c] = generate_distribution_plot(df, c, "covariate")
+
+            results["distribution_plot_map"] = dist_plot_map
+        except Exception as dist_err:
+            print(f"Distribution plot generation failed: {dist_err}")
+            results["distribution_plot_map"] = {}
+
+        # Build distribution stats for frontend
+        try:
+            dist_stats = []
+            all_vars = (
+                [(intent["outcome_variable"], "outcome")]
+                + [(p, "predictor") for p in intent["predictors"]]
+                + [(c, "covariate") for c in intent["confounders"]]
+            )
+            for var_name, role in all_vars:
+                if var_name not in df.columns:
+                    continue
+                col = df[var_name]
+                is_numeric = np.issubdtype(col.dtype, np.number)
+                stat = {
+                    "variable": var_name,
+                    "role": role,
+                    "n": int(col.count()),
+                    "missing": int(col.isna().sum()),
+                    "missing_pct": round(float(col.isna().mean() * 100), 1),
+                    "unique": int(col.nunique()),
+                }
+                if is_numeric:
+                    stat.update({
+                        "mean": round(float(col.mean()), 4),
+                        "std": round(float(col.std()), 4),
+                        "min": round(float(col.min()), 4),
+                        "max": round(float(col.max()), 4),
+                        "median": round(float(col.median()), 4),
+                        "skewness": round(float(col.skew()), 4),
+                    })
+                results.setdefault("distribution_stats", []).append(stat)
+        except Exception as stat_err:
+            print(f"Distribution stats failed: {stat_err}")
 
         return results
     except Exception as e:

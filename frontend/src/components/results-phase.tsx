@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo, useRef, useCallback, useEffect } from "react";
-import { useAppState, RegressionResult, ChatMessage } from "@/lib/store";
+import { useAppState, RegressionResult, ClassifierResult, DistributionStat, ChatMessage } from "@/lib/store";
 import { sendResultsChatStream } from "@/lib/api";
 import {
   Search,
@@ -122,13 +122,16 @@ function PlotImage({
 function RegressionModal({
   r,
   plotMap,
+  dagMap,
   onClose,
 }: {
   r: RegressionResult;
   plotMap?: Record<string, string>;
+  dagMap?: Record<string, string>;
   onClose: () => void;
 }) {
   const [copied, setCopied] = useState(false);
+  const [dagCopied, setDagCopied] = useState(false);
   const tableRef = useRef<HTMLDivElement>(null);
 
   const pLabel =
@@ -197,6 +200,46 @@ function RegressionModal({
   }, [plotMap, r.spec_id, r.predictor, r.model_family]);
 
   const hasPlotImage = !!plotMap?.[r.spec_id];
+  const dagFilename = dagMap?.[r.spec_id];
+
+  const handleCopyDag = useCallback(async () => {
+    if (!dagFilename) return;
+    const url = plotUrl(dagFilename);
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Failed to fetch DAG");
+      const blob = await response.blob();
+      if (typeof ClipboardItem !== "undefined") {
+        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      } else {
+        await navigator.clipboard.writeText(url);
+      }
+      setDagCopied(true);
+      setTimeout(() => setDagCopied(false), 2000);
+    } catch {
+      await navigator.clipboard.writeText(url);
+      setDagCopied(true);
+      setTimeout(() => setDagCopied(false), 2000);
+    }
+  }, [dagFilename]);
+
+  const handleDownloadDag = useCallback(async () => {
+    if (!dagFilename) return;
+    try {
+      const resp = await fetch(plotUrl(dagFilename));
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `dag_${r.predictor}_${r.model_family.replace(/\s+/g, "_")}.png`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch {
+      window.open(plotUrl(dagFilename), "_blank");
+    }
+  }, [dagFilename, r.predictor, r.model_family]);
 
   return (
     <div
@@ -331,6 +374,40 @@ function RegressionModal({
             </div>
           )}
 
+          {/* DAG */}
+          {dagFilename && (
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                  Directed Acyclic Graph (DAG)
+                </p>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={handleDownloadDag}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-border text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                  >
+                    <Download className="w-3 h-3" />
+                    Download
+                  </button>
+                  <button
+                    onClick={handleCopyDag}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-border text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                  >
+                    {dagCopied ? <Check className="w-3 h-3 text-success" /> : <Copy className="w-3 h-3" />}
+                    {dagCopied ? "Copied!" : "Copy"}
+                  </button>
+                </div>
+              </div>
+              <div className="bg-card border border-border rounded-xl overflow-hidden">
+                <img
+                  src={plotUrl(dagFilename)}
+                  alt={`DAG: ${r.predictor} → ${r.outcome}`}
+                  className="w-full h-auto"
+                />
+              </div>
+            </div>
+          )}
+
           {/* Publication note */}
           <div className="bg-accent/50 rounded-xl px-4 py-3">
             <p className="text-xs text-muted-foreground">
@@ -433,6 +510,665 @@ function GridCard({
   );
 }
 
+// ── Classifier card & modal ────────────────────────────────────────────────
+
+function ClassifierCard({
+  cr,
+  plotMap,
+  onClick,
+}: {
+  cr: ClassifierResult;
+  plotMap: Record<string, string>;
+  onClick: () => void;
+}) {
+  const plotFile = plotMap[cr.spec_id];
+  return (
+    <div
+      onClick={onClick}
+      className="border border-border rounded-xl overflow-hidden hover:shadow-md transition-shadow cursor-pointer bg-card"
+    >
+      {plotFile ? (
+        <img
+          src={plotUrl(plotFile)}
+          alt={`${cr.classifier} feature importance`}
+          className="w-full bg-white"
+          loading="lazy"
+        />
+      ) : (
+        <div className="h-32 bg-accent/30 flex items-center justify-center text-xs text-muted-foreground">
+          No plot available
+        </div>
+      )}
+      <div className="px-4 py-3 space-y-2">
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-medium">{cr.classifier}</p>
+          <span className="text-xs font-mono bg-accent px-2 py-0.5 rounded-full">
+            {(cr.accuracy * 100).toFixed(1)}%
+          </span>
+        </div>
+        <div className="flex gap-3 text-xs text-muted-foreground">
+          {cr.auc != null && <span>AUC: {cr.auc.toFixed(3)}</span>}
+          <span>n = {cr.n_obs}</span>
+          <span>{cr.n_features} features</span>
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          {cr.predictors_used.join(", ")}
+          {cr.covariates_used.length > 0 && (
+            <span className="text-muted-foreground/60"> + {cr.covariates_used.length} covariates</span>
+          )}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function ClassifierModal({
+  cr,
+  plotMap,
+  dagMap,
+  onClose,
+}: {
+  cr: ClassifierResult;
+  plotMap: Record<string, string>;
+  dagMap: Record<string, string>;
+  onClose: () => void;
+}) {
+  const plotFile = plotMap[cr.spec_id];
+  const dagFile = dagMap[cr.spec_id];
+  const [dagCopied, setDagCopied] = useState(false);
+
+  const handleDownloadDag = useCallback(async () => {
+    if (!dagFile) return;
+    try {
+      const res = await fetch(plotUrl(dagFile));
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `dag_${cr.classifier.replace(/\s+/g, "_")}.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch { /* ignore */ }
+  }, [dagFile, cr.classifier]);
+
+  const handleCopyDag = useCallback(async () => {
+    if (!dagFile) return;
+    const url = plotUrl(dagFile);
+    try {
+      const response = await fetch(url);
+      const blob = await response.blob();
+      if (typeof ClipboardItem !== "undefined") {
+        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      } else {
+        await navigator.clipboard.writeText(url);
+      }
+      setDagCopied(true);
+      setTimeout(() => setDagCopied(false), 2000);
+    } catch {
+      await navigator.clipboard.writeText(url);
+      setDagCopied(true);
+      setTimeout(() => setDagCopied(false), 2000);
+    }
+  }, [dagFile]);
+
+  const handleDownload = useCallback(async () => {
+    if (!plotFile) return;
+    try {
+      const res = await fetch(plotUrl(plotFile));
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${cr.classifier.replace(/\s+/g, "_")}_importance.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch { /* ignore */ }
+  }, [plotFile, cr.classifier]);
+
+  // Sort feature importance
+  const sortedFeatures = useMemo(() => {
+    return Object.entries(cr.feature_importance)
+      .sort(([, a], [, b]) => b - a);
+  }, [cr.feature_importance]);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-6" onClick={onClose}>
+      <div
+        className="bg-card border border-border rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 bg-card border-b border-border px-6 py-4 flex items-center justify-between z-10">
+          <div>
+            <h3 className="text-base font-semibold">{cr.classifier}</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {cr.predictors_used.join(", ")}
+              {cr.covariates_used.length > 0 && ` + ${cr.covariates_used.length} covariates`}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {plotFile && (
+              <button onClick={handleDownload} className="p-2 rounded-lg hover:bg-accent transition-colors" title="Download plot">
+                <Download className="w-4 h-4 text-muted-foreground" />
+              </button>
+            )}
+            <button onClick={onClose} className="p-2 rounded-lg hover:bg-accent transition-colors">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        <div className="px-6 py-4 space-y-6">
+          {plotFile && (
+            <img src={plotUrl(plotFile)} alt={`${cr.classifier} feature importance`} className="w-full rounded-lg bg-white" />
+          )}
+
+          <div className="border border-border rounded-lg overflow-hidden">
+            <table className="w-full text-sm">
+              <tbody>
+                <tr className="border-b border-border">
+                  <td className="px-4 py-2 text-muted-foreground">Accuracy</td>
+                  <td className="px-4 py-2 text-right font-mono">{(cr.accuracy * 100).toFixed(2)}% ± {(cr.accuracy_std * 100).toFixed(2)}%</td>
+                </tr>
+                {cr.auc != null && (
+                  <tr className="border-b border-border">
+                    <td className="px-4 py-2 text-muted-foreground">AUC</td>
+                    <td className="px-4 py-2 text-right font-mono">{cr.auc.toFixed(4)}{cr.auc_std != null && ` ± ${cr.auc_std.toFixed(4)}`}</td>
+                  </tr>
+                )}
+                {cr.precision != null && (
+                  <tr className="border-b border-border">
+                    <td className="px-4 py-2 text-muted-foreground">Precision</td>
+                    <td className="px-4 py-2 text-right font-mono">{(cr.precision * 100).toFixed(2)}%</td>
+                  </tr>
+                )}
+                {cr.recall != null && (
+                  <tr className="border-b border-border">
+                    <td className="px-4 py-2 text-muted-foreground">Recall</td>
+                    <td className="px-4 py-2 text-right font-mono">{(cr.recall * 100).toFixed(2)}%</td>
+                  </tr>
+                )}
+                <tr className="border-b border-border">
+                  <td className="px-4 py-2 text-muted-foreground">Observations</td>
+                  <td className="px-4 py-2 text-right font-mono">{cr.n_obs}</td>
+                </tr>
+                <tr>
+                  <td className="px-4 py-2 text-muted-foreground">Features</td>
+                  <td className="px-4 py-2 text-right font-mono">{cr.n_features}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div>
+            <h4 className="text-sm font-medium mb-2">Feature Importance</h4>
+            <div className="border border-border rounded-lg overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border bg-accent/30">
+                    <th className="text-left px-4 py-2 font-medium text-muted-foreground text-xs">Feature</th>
+                    <th className="text-right px-4 py-2 font-medium text-muted-foreground text-xs">Importance</th>
+                    <th className="px-4 py-2 w-1/3"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedFeatures.map(([name, value]) => (
+                    <tr key={name} className="border-b border-border last:border-0">
+                      <td className="px-4 py-2 font-medium text-xs">{name}</td>
+                      <td className="px-4 py-2 text-right font-mono text-xs">{(value * 100).toFixed(1)}%</td>
+                      <td className="px-4 py-2">
+                        <div className="w-full bg-accent rounded-full h-2">
+                          <div
+                            className="bg-foreground/60 h-2 rounded-full"
+                            style={{ width: `${Math.min(value / (sortedFeatures[0]?.[1] || 1) * 100, 100)}%` }}
+                          />
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* DAG */}
+          {dagFile && (
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="text-sm font-medium">Directed Acyclic Graph (DAG)</h4>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={handleDownloadDag}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-border text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                  >
+                    <Download className="w-3 h-3" />
+                    Download
+                  </button>
+                  <button
+                    onClick={handleCopyDag}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-border text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                  >
+                    {dagCopied ? <Check className="w-3 h-3 text-success" /> : <Copy className="w-3 h-3" />}
+                    {dagCopied ? "Copied!" : "Copy"}
+                  </button>
+                </div>
+              </div>
+              <div className="border border-border rounded-xl overflow-hidden">
+                <img src={plotUrl(dagFile)} alt={`DAG: ${cr.classifier}`} className="w-full h-auto bg-white" />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ClassifiersTab({
+  classifierResults,
+  classifierPlotMap,
+  classifierDagMap,
+  outcomeType,
+}: {
+  classifierResults: ClassifierResult[];
+  classifierPlotMap: Record<string, string>;
+  classifierDagMap: Record<string, string>;
+  outcomeType: string;
+}) {
+  const [selectedClf, setSelectedClf] = useState<ClassifierResult | null>(null);
+  const [clfSearch, setClfSearch] = useState("");
+  const [clfFilterModel, setClfFilterModel] = useState("all");
+  const [clfViewMode, setClfViewMode] = useState<"list" | "grid">("grid");
+
+  const clfModels = useMemo(() => {
+    return Array.from(new Set(classifierResults.map((c) => c.classifier)));
+  }, [classifierResults]);
+
+  const filtered = useMemo(() => {
+    return classifierResults.filter((cr) => {
+      const q = clfSearch.toLowerCase();
+      const matchSearch = !q || cr.classifier.toLowerCase().includes(q) ||
+        cr.features.some((f) => f.toLowerCase().includes(q));
+      const matchModel = clfFilterModel === "all" || cr.classifier === clfFilterModel;
+      return matchSearch && matchModel;
+    });
+  }, [classifierResults, clfSearch, clfFilterModel]);
+
+  if (outcomeType !== "binary") {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <p className="text-sm text-muted-foreground">Classifiers are available for binary outcomes only.</p>
+      </div>
+    );
+  }
+
+  if (classifierResults.length === 0) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <p className="text-sm text-muted-foreground">No classifier results available.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+      {selectedClf && (
+        <ClassifierModal cr={selectedClf} plotMap={classifierPlotMap} dagMap={classifierDagMap} onClose={() => setSelectedClf(null)} />
+      )}
+
+      <div className="flex gap-3 items-center">
+        <div className="relative flex-1 max-w-sm">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <input
+            value={clfSearch}
+            onChange={(e) => setClfSearch(e.target.value)}
+            placeholder="Search classifiers, features..."
+            className="w-full bg-accent rounded-lg pl-10 pr-4 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        </div>
+        <select
+          value={clfFilterModel}
+          onChange={(e) => setClfFilterModel(e.target.value)}
+          className="bg-accent rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+        >
+          <option value="all">All Classifiers</option>
+          {clfModels.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
+        <div className="ml-auto flex items-center border border-border rounded-lg overflow-hidden">
+          <button
+            onClick={() => setClfViewMode("list")}
+            className={`p-2 transition-colors ${clfViewMode === "list" ? "bg-foreground text-background" : "bg-accent text-muted-foreground hover:text-foreground"}`}
+            title="List view"
+          >
+            <List className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => setClfViewMode("grid")}
+            className={`p-2 transition-colors ${clfViewMode === "grid" ? "bg-foreground text-background" : "bg-accent text-muted-foreground hover:text-foreground"}`}
+            title="Grid view"
+          >
+            <LayoutGrid className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {clfViewMode === "list" && (
+        <div className="border border-border rounded-xl overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border bg-accent/50">
+                <th className="text-left px-4 py-3 font-medium text-muted-foreground">Classifier</th>
+                <th className="text-left px-4 py-3 font-medium text-muted-foreground">Features</th>
+                <th className="text-right px-4 py-3 font-medium text-muted-foreground">Accuracy</th>
+                <th className="text-right px-4 py-3 font-medium text-muted-foreground">AUC</th>
+                <th className="text-right px-4 py-3 font-medium text-muted-foreground">n</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((cr) => (
+                <tr
+                  key={cr.spec_id}
+                  onClick={() => setSelectedClf(cr)}
+                  className="border-b border-border last:border-0 hover:bg-accent/40 transition-colors cursor-pointer"
+                >
+                  <td className="px-4 py-3 font-medium">{cr.classifier}</td>
+                  <td className="px-4 py-3 text-muted-foreground text-xs">
+                    {cr.predictors_used.join(", ")}
+                    {cr.covariates_used.length > 0 && ` +${cr.covariates_used.length}`}
+                  </td>
+                  <td className="px-4 py-3 text-right font-mono text-xs">{(cr.accuracy * 100).toFixed(1)}%</td>
+                  <td className="px-4 py-3 text-right font-mono text-xs">{cr.auc != null ? cr.auc.toFixed(3) : "\u2014"}</td>
+                  <td className="px-4 py-3 text-right font-mono text-xs">{cr.n_obs}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {filtered.length === 0 && (
+            <div className="px-4 py-8 text-center text-sm text-muted-foreground">No results match your filters</div>
+          )}
+        </div>
+      )}
+
+      {clfViewMode === "grid" && (
+        filtered.length === 0 ? (
+          <div className="py-8 text-center text-sm text-muted-foreground">No results match your filters</div>
+        ) : (
+          <div className="grid grid-cols-2 xl:grid-cols-3 gap-4">
+            {filtered.map((cr) => (
+              <ClassifierCard key={cr.spec_id} cr={cr} plotMap={classifierPlotMap} onClick={() => setSelectedClf(cr)} />
+            ))}
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+// ── Distributions tab ─────────────────────────────────────────────────────
+
+function DistributionCard({
+  stat,
+  plotMap,
+  onClick,
+}: {
+  stat: DistributionStat;
+  plotMap: Record<string, string>;
+  onClick: () => void;
+}) {
+  const plotFile = plotMap[stat.variable];
+  const roleColors: Record<string, string> = {
+    outcome: "text-purple-500",
+    predictor: "text-green-500",
+    covariate: "text-gray-500",
+  };
+
+  return (
+    <div
+      onClick={onClick}
+      className="border border-border rounded-xl overflow-hidden hover:shadow-md transition-shadow cursor-pointer bg-card"
+    >
+      {plotFile ? (
+        <img src={plotUrl(plotFile)} alt={`${stat.variable} distribution`} className="w-full bg-white" loading="lazy" />
+      ) : (
+        <div className="h-32 bg-accent/30 flex items-center justify-center text-xs text-muted-foreground">No plot</div>
+      )}
+      <div className="px-4 py-3 space-y-1">
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-medium">{stat.variable}</p>
+          <span className={`text-[11px] font-medium ${roleColors[stat.role] || "text-muted-foreground"}`}>
+            {stat.role}
+          </span>
+        </div>
+        <div className="flex gap-3 text-xs text-muted-foreground">
+          <span>n = {stat.n}</span>
+          {stat.mean != null && <span>μ = {stat.mean.toFixed(2)}</span>}
+          {stat.std != null && <span>σ = {stat.std.toFixed(2)}</span>}
+          {stat.missing_pct > 0 && <span>{stat.missing_pct}% missing</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DistributionModal({
+  stat,
+  plotMap,
+  onClose,
+}: {
+  stat: DistributionStat;
+  plotMap: Record<string, string>;
+  onClose: () => void;
+}) {
+  const plotFile = plotMap[stat.variable];
+
+  const handleDownload = useCallback(async () => {
+    if (!plotFile) return;
+    try {
+      const res = await fetch(plotUrl(plotFile));
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `dist_${stat.variable}.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch { /* ignore */ }
+  }, [plotFile, stat.variable]);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-6" onClick={onClose}>
+      <div
+        className="bg-card border border-border rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 bg-card border-b border-border px-6 py-4 flex items-center justify-between z-10">
+          <div>
+            <h3 className="text-base font-semibold">{stat.variable}</h3>
+            <p className="text-xs text-muted-foreground mt-0.5 capitalize">{stat.role}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {plotFile && (
+              <button onClick={handleDownload} className="p-2 rounded-lg hover:bg-accent transition-colors" title="Download plot">
+                <Download className="w-4 h-4 text-muted-foreground" />
+              </button>
+            )}
+            <button onClick={onClose} className="p-2 rounded-lg hover:bg-accent transition-colors">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        <div className="px-6 py-4 space-y-6">
+          {plotFile && (
+            <img src={plotUrl(plotFile)} alt={`${stat.variable} distribution`} className="w-full rounded-lg bg-white" />
+          )}
+
+          <div className="border border-border rounded-lg overflow-hidden">
+            <table className="w-full text-sm">
+              <tbody>
+                <tr className="border-b border-border">
+                  <td className="px-4 py-2 text-muted-foreground">Count</td>
+                  <td className="px-4 py-2 text-right font-mono">{stat.n}</td>
+                </tr>
+                <tr className="border-b border-border">
+                  <td className="px-4 py-2 text-muted-foreground">Missing</td>
+                  <td className="px-4 py-2 text-right font-mono">{stat.missing} ({stat.missing_pct}%)</td>
+                </tr>
+                <tr className="border-b border-border">
+                  <td className="px-4 py-2 text-muted-foreground">Unique values</td>
+                  <td className="px-4 py-2 text-right font-mono">{stat.unique}</td>
+                </tr>
+                {stat.mean != null && (
+                  <tr className="border-b border-border">
+                    <td className="px-4 py-2 text-muted-foreground">Mean</td>
+                    <td className="px-4 py-2 text-right font-mono">{stat.mean.toFixed(4)}</td>
+                  </tr>
+                )}
+                {stat.std != null && (
+                  <tr className="border-b border-border">
+                    <td className="px-4 py-2 text-muted-foreground">Std Dev</td>
+                    <td className="px-4 py-2 text-right font-mono">{stat.std.toFixed(4)}</td>
+                  </tr>
+                )}
+                {stat.median != null && (
+                  <tr className="border-b border-border">
+                    <td className="px-4 py-2 text-muted-foreground">Median</td>
+                    <td className="px-4 py-2 text-right font-mono">{stat.median.toFixed(4)}</td>
+                  </tr>
+                )}
+                {stat.min != null && stat.max != null && (
+                  <tr className="border-b border-border">
+                    <td className="px-4 py-2 text-muted-foreground">Range</td>
+                    <td className="px-4 py-2 text-right font-mono">[{stat.min.toFixed(4)}, {stat.max.toFixed(4)}]</td>
+                  </tr>
+                )}
+                {stat.skewness != null && (
+                  <tr>
+                    <td className="px-4 py-2 text-muted-foreground">Skewness</td>
+                    <td className="px-4 py-2 text-right font-mono">{stat.skewness.toFixed(4)}</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DistributionsTab({
+  distributionStats,
+  distributionPlotMap,
+}: {
+  distributionStats: DistributionStat[];
+  distributionPlotMap: Record<string, string>;
+}) {
+  const [selectedDist, setSelectedDist] = useState<DistributionStat | null>(null);
+  const [distFilter, setDistFilter] = useState<string>("all");
+  const [distViewMode, setDistViewMode] = useState<"list" | "grid">("grid");
+
+  const filtered = useMemo(() => {
+    if (distFilter === "all") return distributionStats;
+    return distributionStats.filter((d) => d.role === distFilter);
+  }, [distributionStats, distFilter]);
+
+  if (distributionStats.length === 0) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <p className="text-sm text-muted-foreground">No distribution data available.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+      {selectedDist && (
+        <DistributionModal stat={selectedDist} plotMap={distributionPlotMap} onClose={() => setSelectedDist(null)} />
+      )}
+
+      <div className="flex gap-3 items-center">
+        <select
+          value={distFilter}
+          onChange={(e) => setDistFilter(e.target.value)}
+          className="bg-accent rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+        >
+          <option value="all">All Variables</option>
+          <option value="outcome">Outcome</option>
+          <option value="predictor">Predictors</option>
+          <option value="covariate">Covariates</option>
+        </select>
+        <div className="ml-auto flex items-center border border-border rounded-lg overflow-hidden">
+          <button
+            onClick={() => setDistViewMode("list")}
+            className={`p-2 transition-colors ${distViewMode === "list" ? "bg-foreground text-background" : "bg-accent text-muted-foreground hover:text-foreground"}`}
+            title="List view"
+          >
+            <List className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => setDistViewMode("grid")}
+            className={`p-2 transition-colors ${distViewMode === "grid" ? "bg-foreground text-background" : "bg-accent text-muted-foreground hover:text-foreground"}`}
+            title="Grid view"
+          >
+            <LayoutGrid className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {distViewMode === "list" && (
+        <div className="border border-border rounded-xl overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border bg-accent/50">
+                <th className="text-left px-4 py-3 font-medium text-muted-foreground">Variable</th>
+                <th className="text-left px-4 py-3 font-medium text-muted-foreground">Role</th>
+                <th className="text-right px-4 py-3 font-medium text-muted-foreground">n</th>
+                <th className="text-right px-4 py-3 font-medium text-muted-foreground">Mean</th>
+                <th className="text-right px-4 py-3 font-medium text-muted-foreground">Std</th>
+                <th className="text-right px-4 py-3 font-medium text-muted-foreground">Missing</th>
+                <th className="text-right px-4 py-3 font-medium text-muted-foreground">Skew</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((d) => (
+                <tr
+                  key={d.variable}
+                  onClick={() => setSelectedDist(d)}
+                  className="border-b border-border last:border-0 hover:bg-accent/40 transition-colors cursor-pointer"
+                >
+                  <td className="px-4 py-3 font-medium">{d.variable}</td>
+                  <td className="px-4 py-3 text-muted-foreground capitalize text-xs">{d.role}</td>
+                  <td className="px-4 py-3 text-right font-mono text-xs">{d.n}</td>
+                  <td className="px-4 py-3 text-right font-mono text-xs">{d.mean != null ? d.mean.toFixed(2) : "\u2014"}</td>
+                  <td className="px-4 py-3 text-right font-mono text-xs">{d.std != null ? d.std.toFixed(2) : "\u2014"}</td>
+                  <td className="px-4 py-3 text-right font-mono text-xs">{d.missing_pct}%</td>
+                  <td className="px-4 py-3 text-right font-mono text-xs">{d.skewness != null ? d.skewness.toFixed(2) : "\u2014"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {distViewMode === "grid" && (
+        <div className="grid grid-cols-2 xl:grid-cols-3 gap-4">
+          {filtered.map((d) => (
+            <DistributionCard key={d.variable} stat={d} plotMap={distributionPlotMap} onClick={() => setSelectedDist(d)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Sort types ─────────────────────────────────────────────────────────────
 
 type SortField = "coefficient" | "p_value" | "effect_size" | "model_family";
@@ -442,7 +1178,7 @@ type SortDir = "asc" | "desc";
 
 export function ResultsPhase() {
   const { results, sessionId } = useAppState();
-  const [tab, setTab] = useState<"regressions" | "chat">("regressions");
+  const [tab, setTab] = useState<"regressions" | "classifiers" | "distributions" | "chat">("regressions");
   const [viewMode, setViewMode] = useState<"list" | "grid">("grid");
   const [search, setSearch] = useState("");
   const [filterModel, setFilterModel] = useState<string>("all");
@@ -562,7 +1298,7 @@ export function ResultsPhase() {
   return (
     <>
       {selectedReg && (
-        <RegressionModal r={selectedReg} plotMap={plotMap} onClose={() => setSelectedReg(null)} />
+        <RegressionModal r={selectedReg} plotMap={plotMap} dagMap={results.dag_map} onClose={() => setSelectedReg(null)} />
       )}
 
       <div className="flex-1 flex flex-col h-full overflow-hidden">
@@ -578,7 +1314,7 @@ export function ResultsPhase() {
         {/* Tabs */}
         <div className="px-6 border-b border-border">
           <div className="flex gap-6">
-            {(["regressions", "chat"] as const).map((t) => (
+            {(["regressions", "classifiers", "distributions", "chat"] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -588,9 +1324,10 @@ export function ResultsPhase() {
                     : "border-transparent text-muted-foreground hover:text-foreground"
                 }`}
               >
-                {t === "chat"
-                  ? "AI Chat"
-                  : `All Regressions (${results.regressions.length})`}
+                {t === "regressions" ? "Regressions"
+                  : t === "classifiers" ? "Classifiers"
+                  : t === "distributions" ? "Distributions"
+                  : "AI Chat"}
               </button>
             ))}
           </div>
@@ -598,7 +1335,8 @@ export function ResultsPhase() {
 
         {/* Tab Content */}
         <div className="flex-1 overflow-hidden flex flex-col">
-          {tab === "chat" ? (
+          {/* AI Chat tab */}
+          {tab === "chat" && (
             <div className="flex-1 flex flex-col overflow-hidden">
               <div className="flex-1 overflow-y-auto py-6">
                 <div className="max-w-2xl mx-auto px-6 space-y-6">
@@ -664,7 +1402,28 @@ export function ResultsPhase() {
                 </div>
               </div>
             </div>
-          ) : (
+          )}
+
+          {/* Classifiers tab */}
+          {tab === "classifiers" && (
+            <ClassifiersTab
+              classifierResults={results.classifier_results || []}
+              classifierPlotMap={results.classifier_plot_map || {}}
+              classifierDagMap={results.classifier_dag_map || {}}
+              outcomeType={results.outcome_type}
+            />
+          )}
+
+          {/* Distributions tab */}
+          {tab === "distributions" && (
+            <DistributionsTab
+              distributionStats={results.distribution_stats || []}
+              distributionPlotMap={results.distribution_plot_map || {}}
+            />
+          )}
+
+          {/* Regressions tab */}
+          {tab === "regressions" && (
             <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
               {/* Filters + view toggle */}
               <div className="flex gap-3 items-center">
