@@ -11,7 +11,6 @@ import {
   ChevronDown,
   ChevronUp,
 } from "lucide-react";
-import { useAppState as useTheme } from "@/lib/store";
 import {
   ScatterChart,
   Scatter,
@@ -51,8 +50,7 @@ type SortField = "coefficient" | "p_value" | "effect_size" | "model_family";
 type SortDir = "asc" | "desc";
 
 export function ResultsPhase() {
-  const { results, theme } = useAppState();
-  const isDark = theme === "dark";
+  const { results } = useAppState();
   const [tab, setTab] = useState<"overview" | "regressions">("overview");
   const [search, setSearch] = useState("");
   const [filterModel, setFilterModel] = useState<string>("all");
@@ -216,39 +214,39 @@ export function ResultsPhase() {
               </p>
               <ResponsiveContainer width="100%" height={300}>
                 <ScatterChart margin={{ top: 10, right: 20, bottom: 20, left: 20 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={isDark ? "#27272a" : "#e2e8f0"} />
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                   <XAxis
                     dataKey="index"
                     type="number"
                     name="Specification"
-                    tick={{ fontSize: 12, fill: isDark ? "#a1a1aa" : "#64748b" }}
+                    tick={{ fontSize: 12, fill: "#64748b" }}
                     label={{
                       value: "Specification (sorted by effect size)",
                       position: "bottom",
                       offset: 5,
-                      style: { fontSize: 11, fill: isDark ? "#a1a1aa" : "#64748b" },
+                      style: { fontSize: 11, fill: "#64748b" },
                     }}
                   />
                   <YAxis
                     dataKey="coefficient"
                     type="number"
                     name="Coefficient"
-                    tick={{ fontSize: 12, fill: isDark ? "#a1a1aa" : "#64748b" }}
+                    tick={{ fontSize: 12, fill: "#64748b" }}
                     label={{
                       value: "Coefficient",
                       angle: -90,
                       position: "insideLeft",
-                      style: { fontSize: 11, fill: isDark ? "#a1a1aa" : "#64748b" },
+                      style: { fontSize: 11, fill: "#64748b" },
                     }}
                   />
-                  <ReferenceLine y={0} stroke={isDark ? "#a1a1aa" : "#94a3b8"} strokeDasharray="5 5" />
+                  <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="5 5" />
                   <Tooltip
                     contentStyle={{
-                      backgroundColor: isDark ? "#0a0a0f" : "#ffffff",
-                      border: `1px solid ${isDark ? "#27272a" : "#e2e8f0"}`,
+                      backgroundColor: "#ffffff",
+                      border: "1px solid #e2e8f0",
                       borderRadius: "8px",
                       fontSize: "12px",
-                      color: isDark ? "#fafafa" : "#09090b",
+                      color: "#09090b",
                     }}
                     formatter={(value) => [
                       typeof value === "number" ? value.toFixed(4) : String(value),
@@ -259,7 +257,7 @@ export function ResultsPhase() {
                     {specCurveData.map((entry, i) => (
                       <Cell
                         key={i}
-                        fill={entry.significant ? "#22c55e" : isDark ? "#3f3f46" : "#cbd5e1"}
+                        fill={entry.significant ? "#22c55e" : "#cbd5e1"}
                         opacity={entry.significant ? 0.9 : 0.5}
                       />
                     ))}

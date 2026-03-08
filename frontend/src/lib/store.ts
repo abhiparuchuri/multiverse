@@ -65,8 +65,6 @@ export interface AnalysisResults {
   regressions: RegressionResult[];
 }
 
-export type Theme = "dark" | "light";
-
 export interface AppState {
   phase: Phase;
   setPhase: (phase: Phase) => void;
@@ -82,8 +80,6 @@ export interface AppState {
   setResults: (results: AnalysisResults) => void;
   columns: string[];
   setColumns: (columns: string[]) => void;
-  theme: Theme;
-  toggleTheme: () => void;
 }
 
 export const AppContext = createContext<AppState | null>(null);

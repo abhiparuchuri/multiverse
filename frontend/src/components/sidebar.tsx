@@ -9,8 +9,6 @@ import {
   Loader2,
   BarChart3,
   Check,
-  Sun,
-  Moon,
 } from "lucide-react";
 
 const phases: { id: Phase; label: string; icon: typeof Upload }[] = [
@@ -22,7 +20,7 @@ const phases: { id: Phase; label: string; icon: typeof Upload }[] = [
 ];
 
 export function Sidebar() {
-  const { phase, setPhase, completedPhases, theme, toggleTheme } = useAppState();
+  const { phase, setPhase, completedPhases } = useAppState();
 
   const canNavigate = (p: Phase) => {
     return completedPhases.includes(p) || p === phase;
@@ -39,7 +37,7 @@ export function Sidebar() {
         <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider px-3 mb-3">
           Workflow
         </p>
-        {phases.map((p, i) => {
+        {phases.map((p) => {
           const isActive = phase === p.id;
           const isCompleted = completedPhases.includes(p.id);
           const isLocked = !canNavigate(p.id);
@@ -83,18 +81,7 @@ export function Sidebar() {
           );
         })}
       </nav>
-      <div className="p-4 border-t border-border space-y-3">
-        <button
-          onClick={toggleTheme}
-          className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors"
-        >
-          {theme === "dark" ? (
-            <Sun className="w-4 h-4" />
-          ) : (
-            <Moon className="w-4 h-4" />
-          )}
-          <span>{theme === "dark" ? "Light Mode" : "Dark Mode"}</span>
-        </button>
+      <div className="p-4 border-t border-border">
         <p className="text-xs text-muted-foreground px-3">
           Hackathon POC v0.1
         </p>
