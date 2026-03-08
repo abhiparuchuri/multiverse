@@ -594,9 +594,10 @@ def extract_intent_from_conversation(
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         return json.loads(text)
     except Exception as e:
-        # Fallback: return a best-effort extraction
+        # Fallback: return empty structure so readiness checks remain conservative.
         return {
-            "outcome_variable": columns[0] if columns else "",
-            "predictors": columns[1:3] if len(columns) > 2 else columns[1:],
+            "outcome_variable": "",
+            "predictors": [],
             "confounders": [],
+            "hypothesis": "",
         }

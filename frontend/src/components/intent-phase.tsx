@@ -7,6 +7,12 @@ import { Send, Loader2, Lock, AlertTriangle, ChevronRight, Sparkles, ArrowLeftRi
 import { Markdown } from "@/components/markdown";
 
 type PanelTab = "variables" | "modifications";
+type IntentDraft = {
+  outcome_variable: string;
+  predictors: string[];
+  confounders: string[];
+  hypothesis?: string;
+};
 
 function DistributionBar({ profile }: { profile: ColumnProfile }) {
   const bins = profile.histogram;
@@ -89,6 +95,7 @@ export function IntentPhase() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [intentReady, setIntentReady] = useState(false);
+  const [intentDraft, setIntentDraft] = useState<IntentDraft | null>(null);
   const [initializing, setInitializing] = useState(true);
   const [collapsed, setCollapsed] = useState(false);
   const [panelTab, setPanelTab] = useState<PanelTab>("variables");
@@ -113,7 +120,7 @@ export function IntentPhase() {
     if (!sessionId || !initializing) return;
 
     setMessages([{ role: "assistant", content: "" }]);
-    sendIntentChatStream(sessionId, "__init__", [], {
+    sendIntentChatStream(sessionId, "__init__", [], undefined, {
       onChunk: (chunk) => {
         setMessages((prev) => {
           const current = prev[0]?.content || "";
@@ -147,7 +154,7 @@ export function IntentPhase() {
 
     try {
       let streamed = "";
-      const data = await sendIntentChatStream(sessionId, userMsg.content, updatedMessages, {
+      const data = await sendIntentChatStream(sessionId, userMsg.content, updatedMessages, undefined, {
         onChunk: (chunk) => {
           streamed += chunk;
           setMessages([...updatedMessages, { role: "assistant", content: streamed }]);
@@ -157,9 +164,8 @@ export function IntentPhase() {
         ...updatedMessages,
         { role: "assistant", content: String(data.response || streamed) },
       ]);
-      if (data.intent_ready) {
-        setIntentReady(true);
-      }
+      setIntentReady(Boolean(data.intent_ready));
+      setIntentDraft((data.intent_draft as IntentDraft) || null);
     } catch {
       setMessages([
         ...updatedMessages,
@@ -179,7 +185,12 @@ export function IntentPhase() {
 
     try {
       // Send a commit message to finalize intent
-      const data = await sendIntentChat(sessionId, "__commit__", messages);
+      const data = await sendIntentChat(
+        sessionId,
+        "__commit__",
+        messages,
+        intentDraft || undefined
+      );
       if (data.committed) {
         setCompletedPhases([...completedPhases, "intent"]);
         setPhase("analysis");
@@ -192,6 +203,24 @@ export function IntentPhase() {
       setLoading(false);
     }
   };
+
+  const toggleCovariate = (name: string) => {
+    if (!intentDraft) return;
+    const next = intentDraft.confounders.includes(name)
+      ? intentDraft.confounders.filter((c) => c !== name)
+      : [...intentDraft.confounders, name];
+    setIntentDraft({ ...intentDraft, confounders: next });
+  };
+
+  const covariateOptions = dataProfile
+    ? dataProfile.column_profiles
+        .map((c) => c.name)
+        .filter(
+          (name) =>
+            name !== intentDraft?.outcome_variable &&
+            !intentDraft?.predictors?.includes(name)
+        )
+    : [];
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden">
@@ -279,6 +308,32 @@ export function IntentPhase() {
                   <Send className="w-3.5 h-3.5" />
                 </button>
               </div>
+              {intentDraft && (
+                <div className="mt-3 rounded-xl border border-border bg-card px-3 py-2.5">
+                  <p className="text-[11px] font-medium text-foreground mb-2">
+                    Proposed Covariates (editable before commit)
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {covariateOptions.map((name) => {
+                      const active = intentDraft.confounders.includes(name);
+                      return (
+                        <button
+                          key={name}
+                          type="button"
+                          onClick={() => toggleCovariate(name)}
+                          className={`px-2.5 py-1 rounded-full text-[11px] border transition-colors ${
+                            active
+                              ? "bg-foreground text-background border-foreground"
+                              : "bg-background text-muted-foreground border-border hover:text-foreground"
+                          }`}
+                        >
+                          {name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               {intentReady && (
                 <p className="text-xs text-center text-muted-foreground mt-2">
                   Your study intent is ready. Click &quot;Commit & Run Analysis&quot; to lock it in and begin.

@@ -40,6 +40,9 @@ export type IntentStreamFinal = {
   intent_ready?: boolean;
   committed?: boolean;
   intent?: unknown;
+  missing_fields?: string[];
+  intent_draft?: unknown;
+  covariates_auto_assigned?: boolean;
 };
 
 async function consumeNdjsonStream(
@@ -146,7 +149,13 @@ export async function revertModification(
 export async function sendIntentChat(
   sessionId: string,
   message: string,
-  chatHistory: { role: string; content: string }[]
+  chatHistory: { role: string; content: string }[],
+  intentOverride?: {
+    outcome_variable?: string;
+    predictors?: string[];
+    confounders?: string[];
+    hypothesis?: string;
+  }
 ) {
   const res = await fetch(`${API_BASE}/intent-chat`, {
     method: "POST",
@@ -155,6 +164,7 @@ export async function sendIntentChat(
       session_id: sessionId,
       message,
       chat_history: chatHistory,
+      intent_override: intentOverride,
     }),
   });
   return res.json();
@@ -164,6 +174,12 @@ export async function sendIntentChatStream(
   sessionId: string,
   message: string,
   chatHistory: { role: string; content: string }[],
+  intentOverride?: {
+    outcome_variable?: string;
+    predictors?: string[];
+    confounders?: string[];
+    hypothesis?: string;
+  },
   handlers: { onChunk?: (chunk: string) => void } = {}
 ): Promise<IntentStreamFinal> {
   const res = await fetch(`${API_BASE}/intent-chat-stream`, {
@@ -173,6 +189,7 @@ export async function sendIntentChatStream(
       session_id: sessionId,
       message,
       chat_history: chatHistory,
+      intent_override: intentOverride,
     }),
   });
   if (!res.ok) {

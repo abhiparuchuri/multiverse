@@ -47,6 +47,7 @@ class IntentChatRequest(BaseModel):
     session_id: str
     message: str
     chat_history: list[dict]
+    intent_override: Optional[dict] = None
 
 
 class UpdateVariableRequest(BaseModel):
@@ -442,15 +443,43 @@ async def intent_chat(request: IntentChatRequest):
             chat_history=[],
             user_message=None,
         )
-        return {"response": response, "intent_ready": False}
+        return {
+            "response": response,
+            "intent_ready": False,
+            "missing_fields": ["outcome", "predictors", "covariates"],
+            "intent_draft": None,
+            "covariates_auto_assigned": False,
+        }
 
     # Handle commit — extract structured intent from conversation
     if request.message == "__commit__":
-        intent = extract_intent_from_conversation(
-            profile=profile,
-            columns=columns,
-            chat_history=request.chat_history,
-        )
+        if request.intent_override:
+            intent = request.intent_override
+            column_set = set(columns)
+            missing_fields = []
+            outcome = intent.get("outcome_variable")
+            predictors = [p for p in (intent.get("predictors") or []) if p in column_set]
+            covariates = [c for c in (intent.get("confounders") or []) if c in column_set]
+            intent["predictors"] = predictors
+            intent["confounders"] = covariates
+            if not outcome or outcome not in column_set:
+                missing_fields.append("outcome")
+            if len(predictors) == 0:
+                missing_fields.append("predictors")
+            if len(covariates) == 0:
+                missing_fields.append("covariates")
+            intent_ready = len(missing_fields) == 0
+        else:
+            intent_ready, missing_fields, intent, _ = _assess_intent_completeness(
+                profile=profile,
+                chat_history=request.chat_history,
+            )
+        if not intent_ready:
+            return {
+                "committed": False,
+                "intent_ready": False,
+                "missing_fields": missing_fields,
+            }
         intent["timestamp"] = pd.Timestamp.now().isoformat()
         session["intent"] = intent
         return {"committed": True, "intent": intent}
@@ -464,12 +493,29 @@ async def intent_chat(request: IntentChatRequest):
     )
 
     # Check if we have enough info to show the commit button
-    intent_ready = _check_intent_completeness(request.chat_history + [
+    convo = request.chat_history + [
         {"role": "user", "content": request.message},
         {"role": "assistant", "content": response},
-    ])
+    ]
+    intent_ready, missing_fields, intent_draft, covariates_auto_assigned = _assess_intent_completeness(
+        profile=profile,
+        chat_history=convo,
+    )
+    if covariates_auto_assigned and intent_draft.get("confounders"):
+        covars = ", ".join(intent_draft["confounders"])
+        response = (
+            f"{response}\n\n"
+            f"Proposed covariates (auto-assigned as all non-predictor variables): {covars}.\n"
+            f"Tell me if you want to remove or add any covariates before committing."
+        )
 
-    return {"response": response, "intent_ready": intent_ready}
+    return {
+        "response": response,
+        "intent_ready": intent_ready,
+        "missing_fields": missing_fields,
+        "intent_draft": intent_draft,
+        "covariates_auto_assigned": covariates_auto_assigned,
+    }
 
 
 @app.post("/intent-chat-stream")
@@ -488,11 +534,35 @@ async def intent_chat_stream(request: IntentChatRequest):
     async def event_stream():
         try:
             if request.message == "__commit__":
-                intent = extract_intent_from_conversation(
-                    profile=profile,
-                    columns=columns,
-                    chat_history=request.chat_history,
-                )
+                if request.intent_override:
+                    intent = request.intent_override
+                    column_set = set(columns)
+                    missing_fields = []
+                    outcome = intent.get("outcome_variable")
+                    predictors = [p for p in (intent.get("predictors") or []) if p in column_set]
+                    covariates = [c for c in (intent.get("confounders") or []) if c in column_set]
+                    intent["predictors"] = predictors
+                    intent["confounders"] = covariates
+                    if not outcome or outcome not in column_set:
+                        missing_fields.append("outcome")
+                    if len(predictors) == 0:
+                        missing_fields.append("predictors")
+                    if len(covariates) == 0:
+                        missing_fields.append("covariates")
+                    intent_ready = len(missing_fields) == 0
+                else:
+                    intent_ready, missing_fields, intent, _ = _assess_intent_completeness(
+                        profile=profile,
+                        chat_history=request.chat_history,
+                    )
+                if not intent_ready:
+                    yield json.dumps({
+                        "type": "final",
+                        "committed": False,
+                        "intent_ready": False,
+                        "missing_fields": missing_fields,
+                    }) + "\n"
+                    return
                 intent["timestamp"] = pd.Timestamp.now().isoformat()
                 session["intent"] = intent
                 yield json.dumps({"type": "final", "committed": True, "intent": intent}) + "\n"
@@ -514,13 +584,34 @@ async def intent_chat_stream(request: IntentChatRequest):
                 await asyncio.sleep(0)
 
             intent_ready = False
+            missing_fields = ["outcome", "predictors", "covariates"]
+            intent_draft = None
+            covariates_auto_assigned = False
             if request.message != "__init__":
-                intent_ready = _check_intent_completeness(request.chat_history + [
+                convo = request.chat_history + [
                     {"role": "user", "content": request.message},
                     {"role": "assistant", "content": response},
-                ])
+                ]
+                intent_ready, missing_fields, intent_draft, covariates_auto_assigned = _assess_intent_completeness(
+                    profile=profile,
+                    chat_history=convo,
+                )
+                if covariates_auto_assigned and intent_draft and intent_draft.get("confounders"):
+                    covars = ", ".join(intent_draft["confounders"])
+                    response = (
+                        f"{response}\n\n"
+                        f"Proposed covariates (auto-assigned as all non-predictor variables): {covars}.\n"
+                        f"Tell me if you want to remove or add any covariates before committing."
+                    )
 
-            yield json.dumps({"type": "final", "response": response, "intent_ready": intent_ready}) + "\n"
+            yield json.dumps({
+                "type": "final",
+                "response": response,
+                "intent_ready": intent_ready,
+                "missing_fields": missing_fields,
+                "intent_draft": intent_draft,
+                "covariates_auto_assigned": covariates_auto_assigned,
+            }) + "\n"
         except Exception as e:
             yield json.dumps({"type": "error", "error": str(e)}) + "\n"
 
@@ -567,15 +658,59 @@ async def results_chat_stream(request: ResultsChatRequest):
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
-def _check_intent_completeness(chat_history: list[dict]) -> bool:
-    """Simple heuristic: intent is ready if conversation has enough back-and-forth."""
-    user_messages = [m for m in chat_history if m.get("role") == "user"]
-    # Need at least 2 substantive user messages
-    if len(user_messages) < 2:
-        return False
-    # Check if total content length suggests enough detail
-    total_content = " ".join(m["content"] for m in user_messages)
-    return len(total_content) > 80
+def _user_explicitly_declared_no_covariates(chat_history: list[dict]) -> bool:
+    """Detect explicit user statements that no covariates/confounders are needed."""
+    user_text = " ".join(
+        str(m.get("content", "")).lower() for m in chat_history if m.get("role") == "user"
+    )
+    patterns = [
+        r"\bno\s+covariates?\b",
+        r"\bno\s+confounders?\b",
+        r"\bno\s+controls?\b",
+        r"\bnone\s+for\s+(?:covariates?|confounders?|controls?)\b",
+    ]
+    return any(re.search(p, user_text) for p in patterns)
+
+
+def _assess_intent_completeness(
+    profile: dict,
+    chat_history: list[dict],
+) -> tuple[bool, list[str], dict, bool]:
+    """
+    Readiness rule for enabling commit:
+    - outcome defined
+    - predictors defined
+    - covariates defined (mapped to confounders field)
+    """
+    columns = [c["name"] for c in profile["column_profiles"]]
+    column_set = set(columns)
+    intent = extract_intent_from_conversation(
+        profile=profile,
+        columns=columns,
+        chat_history=chat_history,
+    )
+
+    missing_fields: list[str] = []
+    covariates_auto_assigned = False
+
+    outcome = intent.get("outcome_variable")
+    if not outcome or outcome not in column_set:
+        missing_fields.append("outcome")
+
+    predictors = [p for p in (intent.get("predictors") or []) if p in column_set]
+    intent["predictors"] = predictors
+    if len(predictors) == 0:
+        missing_fields.append("predictors")
+
+    covariates = [c for c in (intent.get("confounders") or []) if c in column_set]
+    if len(covariates) == 0 and outcome in column_set and len(predictors) > 0:
+        covariates = [c for c in columns if c != outcome and c not in set(predictors)]
+        covariates_auto_assigned = True
+    intent["confounders"] = covariates
+    if len(covariates) == 0 and not _user_explicitly_declared_no_covariates(chat_history):
+        missing_fields.append("covariates")
+
+    return len(missing_fields) == 0, missing_fields, intent, covariates_auto_assigned
 
 
 @app.post("/analyze")
@@ -606,7 +741,7 @@ async def analyze(request: AnalyzeRequest):
 
         # Generate publication-ready plots
         try:
-            plot_map = generate_all_plots(results)
+            plot_map = generate_all_plots(results, df=session["df"])
             results["plot_map"] = plot_map
         except Exception as plot_err:
             print(f"Plot generation failed: {plot_err}")
