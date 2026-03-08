@@ -113,38 +113,34 @@ Tone: Direct, honest, constructive. Like a rigorous peer reviewer who wants the 
 Keep it under 300 words.
 """
 
-STAGE_STUDY_INTENT = """You are in the STUDY INTENT stage. Your job is to help the researcher clearly articulate their research hypothesis through natural conversation. This will become their **pre-registration record** — a timestamped commitment made before seeing results.
+STAGE_STUDY_INTENT = """You are in the STUDY INTENT stage. Your job is to help the researcher define the structure of their analysis through natural conversation. The multiverse platform will test ALL possible specifications exhaustively, so we do NOT need a directional hypothesis — we just need to know what to test.
 
 Your goals in this conversation:
-1. **Identify the outcome variable** — what are they trying to predict/explain? Is it continuous, binary, or something else?
-2. **Identify hypothesized predictors** — what variables do they think drive the outcome? In what direction?
-3. **Identify known confounders** — what variables should always be controlled for?
-4. **Capture the hypothesis in plain language** — a clear statement of what they expect to find and why
-5. **Probe for specificity** — vague hypotheses lead to vague analyses. Push for directional predictions ("higher X → more Y" not just "X is related to Y")
+1. **Identify the outcome variable** — what are they trying to predict/explain? Confirm whether it's continuous, binary, or ordinal.
+2. **Identify predictor variables** — what variables do they want to test as predictors of the outcome?
+3. **Identify covariates/confounders** — what variables should be controlled for across all specifications? (can be empty)
 
 How to conduct the conversation:
-- Start by asking what they're researching and what they want to learn from this data
+- Start by asking what outcome they're interested in studying
 - Use the column names from their dataset to make the conversation concrete
-- If they're vague, ask clarifying questions: "Do you expect a positive or negative relationship?"
-- Summarize what you've captured so far and ask them to confirm
-- When you have all four pieces (outcome, predictors, confounders, hypothesis), present a clean summary and tell them they can commit their pre-registration
+- Help them distinguish predictors (variables of interest) from covariates (controls)
+- When you have all three pieces (outcome, predictors, covariates), present a clean summary and tell them they can commit and run the analysis
 
 Do NOT:
-- Suggest hypotheses. The researcher must state their own expectations.
+- Ask for directional hypotheses or expected effect directions — the whole point of multiverse analysis is to remove researcher bias
+- Suggest which predictors to use — the researcher must choose
 - Analyze the data or preview potential results
-- Let them proceed without a directional hypothesis
 
 Use markdown formatting: **bold** for variable names, bullet lists for structured summaries.
-Keep responses under 200 words.
+Keep responses under 150 words.
 """
 
 STAGE_INTENT_EXTRACTION = """Extract the structured study intent from this conversation between a researcher and an AI assistant.
 
 Return a JSON object with exactly these fields:
 - "outcome_variable": the column name for the outcome (Y variable)
-- "predictors": a list of column names the researcher hypothesizes as predictors
+- "predictors": a list of column names the researcher wants to test as predictors
 - "confounders": a list of column names to always control for (can be empty list)
-- "hypothesis": a plain-language summary of their hypothesis
 
 Available columns in the dataset: {columns}
 
@@ -349,16 +345,117 @@ Provide your summary and recommendations."""
         )
 
 
-def generate_intent_chat(
-    profile: dict,
-    columns: list[str],
+STAGE_RESULTS_CHAT = """You are in the RESULTS stage. The multiverse analysis is complete and the researcher is asking questions about their results.
+
+You have access to the full analysis results including all regression specifications, their coefficients, p-values, effect sizes, and assumption checks.
+
+Your job:
+- Answer questions about robustness: how consistent are the results across different model specifications?
+- Explain what the regression results mean for their research question
+- Help them understand which findings are robust and which are fragile
+- Discuss effect sizes in context — statistical significance alone doesn't mean clinical/practical importance
+- Flag when different model types tell different stories (a key indicator of specification sensitivity)
+- If they ask about specific predictors or models, give them a detailed breakdown
+- Be honest: if results are weak or inconsistent, say so clearly
+
+Do NOT:
+- Spin weak results as strong
+- Recommend cherry-picking favorable specifications
+- Make causal claims from observational data without caveats
+
+Tone: Direct, honest, constructive. Like a rigorous peer reviewer.
+Keep responses under 250 words.
+"""
+
+
+def _build_results_context(results: dict) -> str:
+    """Build a results context string for injection into prompts."""
+    regressions = results.get("regressions", [])
+
+    predictor_stats = {}
+    for r in regressions:
+        pred = r["predictor"]
+        if pred not in predictor_stats:
+            predictor_stats[pred] = {"total": 0, "significant": 0, "coefficients": [], "effect_sizes": []}
+        predictor_stats[pred]["total"] += 1
+        if r.get("significant_corrected"):
+            predictor_stats[pred]["significant"] += 1
+        predictor_stats[pred]["coefficients"].append(r.get("coefficient", 0))
+        predictor_stats[pred]["effect_sizes"].append(r.get("effect_size", 0))
+
+    predictor_summary = "\n".join(
+        f"  - {pred}: {s['significant']}/{s['total']} specs significant, "
+        f"mean coeff={sum(s['coefficients'])/len(s['coefficients']):.4f}, "
+        f"mean effect={sum(s['effect_sizes'])/len(s['effect_sizes']):.4f}"
+        for pred, s in predictor_stats.items()
+    )
+
+    model_families = {}
+    for r in regressions:
+        fam = r["model_family"]
+        if fam not in model_families:
+            model_families[fam] = {"total": 0, "significant": 0}
+        model_families[fam]["total"] += 1
+        if r.get("significant_corrected"):
+            model_families[fam]["significant"] += 1
+
+    model_summary = "\n".join(
+        f"  - {fam}: {s['significant']}/{s['total']} significant"
+        for fam, s in model_families.items()
+    )
+
+    assumption_issues = sum(1 for r in regressions if not r.get("assumptions_met", True))
+
+    return f"""Analysis results:
+Outcome: {results['outcome_variable']} ({results['outcome_type']})
+Total specifications: {results['total_specs']}
+Significant after FDR: {results['significant_specs']} ({results['robustness_pct']}%)
+Mean effect size: {results['mean_effect_size']}
+Assumption violations: {assumption_issues}/{results['total_specs']}
+
+Per-predictor breakdown:
+{predictor_summary}
+
+Per-model-family breakdown:
+{model_summary}"""
+
+
+def stream_results_chat(
+    results: dict,
     chat_history: list[dict],
-    user_message: Optional[str],
-) -> str:
-    """Generate a chat response for the study intent stage."""
-    data_context = _build_data_context(profile)
+    user_message: str,
+):
+    """Stream chat response tokens about analysis results. Yields (token, full_text) tuples."""
+    results_context = _build_results_context(results)
 
     system = f"""{SYSTEM_IDENTITY}
+
+{STAGE_RESULTS_CHAT}
+
+{results_context}"""
+
+    messages = []
+    for msg in chat_history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": user_message})
+
+    with client.messages.stream(
+        model="claude-sonnet-4-20250514",
+        max_tokens=500,
+        system=system,
+        messages=messages,
+    ) as stream:
+        full = ""
+        for token in stream.text_stream:
+            full += token
+            yield token, full
+        return full
+
+
+def _build_intent_system(profile: dict, columns: list[str]) -> str:
+    """Build the system prompt for intent chat."""
+    data_context = _build_data_context(profile)
+    return f"""{SYSTEM_IDENTITY}
 
 {STAGE_STUDY_INTENT}
 
@@ -367,18 +464,31 @@ The researcher's dataset has these columns: {', '.join(columns)}
 Dataset context:
 {data_context}"""
 
+
+def _build_intent_messages(chat_history: list[dict], user_message: Optional[str]) -> list[dict]:
+    """Build the messages list for intent chat."""
     messages = []
     for msg in chat_history:
         messages.append({"role": msg["role"], "content": msg["content"]})
-
     if user_message is None:
-        # Init message — ask Claude to start the conversation
         messages.append({
             "role": "user",
-            "content": "I'm ready to define my study intent. Please help me articulate my research hypothesis for this dataset.",
+            "content": "I'm ready to define my study intent. Please help me define the analysis structure for this dataset.",
         })
     else:
         messages.append({"role": "user", "content": user_message})
+    return messages
+
+
+def generate_intent_chat(
+    profile: dict,
+    columns: list[str],
+    chat_history: list[dict],
+    user_message: Optional[str],
+) -> str:
+    """Generate a chat response for the study intent stage."""
+    system = _build_intent_system(profile, columns)
+    messages = _build_intent_messages(chat_history, user_message)
 
     try:
         response = client.messages.create(
@@ -390,6 +500,69 @@ Dataset context:
         return response.content[0].text
     except Exception as e:
         return f"I encountered an error: {str(e)}. Please try again."
+
+
+def stream_intent_chat(
+    profile: dict,
+    columns: list[str],
+    chat_history: list[dict],
+    user_message: Optional[str],
+):
+    """Stream intent chat tokens. Yields (token, full_text) tuples."""
+    system = _build_intent_system(profile, columns)
+    messages = _build_intent_messages(chat_history, user_message)
+
+    with client.messages.stream(
+        model="claude-sonnet-4-20250514",
+        max_tokens=500,
+        system=system,
+        messages=messages,
+    ) as stream:
+        full = ""
+        for token in stream.text_stream:
+            full += token
+            yield token, full
+        return full
+
+
+def stream_chat_response(
+    profile: dict, chat_history: list[dict], user_message: str
+):
+    """Stream data chat tokens. Yields (token, full_text) tuples."""
+    data_context = _build_data_context(profile)
+
+    system = f"""{SYSTEM_IDENTITY}
+
+{STAGE_VARIABLE_CHAT}
+
+Current dataset context:
+{data_context}
+
+Detailed column stats:
+{json.dumps([{
+    'name': c['name'],
+    'type': c.get('distribution', c['dtype']),
+    'skewed': c.get('is_skewed', False),
+    'missing_pct': c['missing_pct'],
+    'stats': {k: c[k] for k in ['mean', 'std', 'min', 'max', 'skewness'] if k in c}
+} for c in profile['column_profiles']], indent=2)}"""
+
+    messages = []
+    for msg in chat_history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": user_message})
+
+    with client.messages.stream(
+        model="claude-sonnet-4-20250514",
+        max_tokens=400,
+        system=system,
+        messages=messages,
+    ) as stream:
+        full = ""
+        for token in stream.text_stream:
+            full += token
+            yield token, full
+        return full
 
 
 def extract_intent_from_conversation(
@@ -426,5 +599,4 @@ def extract_intent_from_conversation(
             "outcome_variable": columns[0] if columns else "",
             "predictors": columns[1:3] if len(columns) > 2 else columns[1:],
             "confounders": [],
-            "hypothesis": "Extracted from conversation (parsing failed)",
         }

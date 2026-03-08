@@ -333,7 +333,7 @@ def run_multiverse_analysis(
     outcome: str,
     predictors: list[str],
     confounders: list[str],
-    hypothesis: str,
+    hypothesis: str = "",
 ) -> dict:
     """Run the full multiverse analysis."""
     # Clean data

@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from analysis_engine import run_multiverse_analysis
-from llm import generate_data_profile_chat, generate_chat_response, generate_intent_chat, extract_intent_from_conversation, generate_summary
+from llm import generate_data_profile_chat, generate_chat_response, generate_intent_chat, extract_intent_from_conversation, stream_results_chat, stream_intent_chat, stream_chat_response
 from plot_generator import generate_all_plots, PLOT_DIR
 
 app = FastAPI(title="Multiverse API")
@@ -253,11 +253,6 @@ def _apply_variable_edits(session: dict, edits: list[dict], source: str = "ai") 
     return new_mods
 
 
-def _iter_text_chunks(text: str, size: int = 24):
-    """Yield fixed-size text chunks for incremental UI streaming."""
-    for i in range(0, len(text), size):
-        yield text[i : i + size]
-
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
@@ -309,13 +304,20 @@ async def chat_stream(request: ChatRequest):
 
     async def event_stream():
         try:
-            response = generate_chat_response(
+            # Stream tokens from LLM, collecting full response
+            full_response = ""
+            for token, full in stream_chat_response(
                 session["profile"],
                 session["chat_history"],
                 request.message,
-            )
+            ):
+                full_response = full
+                # Stream raw tokens to client for progressive rendering
+                yield json.dumps({"type": "chunk", "content": token}) + "\n"
+                await asyncio.sleep(0)
 
-            clean_response, edits = _parse_variable_edits(response)
+            # Parse structured blocks from complete response
+            clean_response, edits = _parse_variable_edits(full_response)
             new_mods = []
             if edits:
                 new_mods = _apply_variable_edits(session, edits, source="ai")
@@ -328,10 +330,6 @@ async def chat_stream(request: ChatRequest):
 
             session["chat_history"].append({"role": "user", "content": request.message})
             session["chat_history"].append({"role": "assistant", "content": clean_response})
-
-            for chunk in _iter_text_chunks(clean_response):
-                yield json.dumps({"type": "chunk", "content": chunk}) + "\n"
-                await asyncio.sleep(0)
 
             final_payload = {"type": "final", "response": clean_response}
             if edits or transform:
@@ -500,36 +498,69 @@ async def intent_chat_stream(request: IntentChatRequest):
                 yield json.dumps({"type": "final", "committed": True, "intent": intent}) + "\n"
                 return
 
-            if request.message == "__init__":
-                response = generate_intent_chat(
-                    profile=profile,
-                    columns=columns,
-                    chat_history=[],
-                    user_message=None,
-                )
-                for chunk in _iter_text_chunks(response):
-                    yield json.dumps({"type": "chunk", "content": chunk}) + "\n"
-                    await asyncio.sleep(0)
-                yield json.dumps({"type": "final", "response": response, "intent_ready": False}) + "\n"
-                return
+            # True token streaming for both __init__ and regular messages
+            user_msg = None if request.message == "__init__" else request.message
+            history = [] if request.message == "__init__" else request.chat_history
 
-            response = generate_intent_chat(
+            response = ""
+            for token, full in stream_intent_chat(
                 profile=profile,
                 columns=columns,
-                chat_history=request.chat_history,
-                user_message=request.message,
-            )
-
-            intent_ready = _check_intent_completeness(request.chat_history + [
-                {"role": "user", "content": request.message},
-                {"role": "assistant", "content": response},
-            ])
-
-            for chunk in _iter_text_chunks(response):
-                yield json.dumps({"type": "chunk", "content": chunk}) + "\n"
+                chat_history=history,
+                user_message=user_msg,
+            ):
+                response = full
+                yield json.dumps({"type": "chunk", "content": token}) + "\n"
                 await asyncio.sleep(0)
 
+            intent_ready = False
+            if request.message != "__init__":
+                intent_ready = _check_intent_completeness(request.chat_history + [
+                    {"role": "user", "content": request.message},
+                    {"role": "assistant", "content": response},
+                ])
+
             yield json.dumps({"type": "final", "response": response, "intent_ready": intent_ready}) + "\n"
+        except Exception as e:
+            yield json.dumps({"type": "error", "error": str(e)}) + "\n"
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
+
+class ResultsChatRequest(BaseModel):
+    session_id: str
+    message: str
+    chat_history: list[dict]
+
+
+@app.post("/results-chat-stream")
+async def results_chat_stream(request: ResultsChatRequest):
+    """Stream results chat response chunks, then emit final metadata event."""
+    session = sessions.get(request.session_id)
+    if not session:
+        async def missing_session():
+            yield json.dumps({"type": "error", "error": "Session not found"}) + "\n"
+        return StreamingResponse(missing_session(), media_type="application/x-ndjson")
+
+    results = session.get("results")
+    if not results:
+        async def no_results():
+            yield json.dumps({"type": "error", "error": "No analysis results available"}) + "\n"
+        return StreamingResponse(no_results(), media_type="application/x-ndjson")
+
+    async def event_stream():
+        try:
+            response = ""
+            for token, full in stream_results_chat(
+                results=results,
+                chat_history=request.chat_history,
+                user_message=request.message,
+            ):
+                response = full
+                yield json.dumps({"type": "chunk", "content": token}) + "\n"
+                await asyncio.sleep(0)
+
+            yield json.dumps({"type": "final", "response": response}) + "\n"
         except Exception as e:
             yield json.dumps({"type": "error", "error": str(e)}) + "\n"
 
@@ -566,12 +597,11 @@ async def analyze(request: AnalyzeRequest):
             outcome=intent["outcome_variable"],
             predictors=intent["predictors"],
             confounders=intent["confounders"],
-            hypothesis=intent["hypothesis"],
+            hypothesis=intent.get("hypothesis", ""),
         )
 
-        # Generate LLM summary
-        summary = generate_summary(results, intent)
-        results["summary"] = summary
+        # Store results for results-chat
+        session["results"] = results
         results["session_id"] = request.session_id
 
         # Generate publication-ready plots

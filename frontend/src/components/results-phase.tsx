@@ -1,12 +1,9 @@
 "use client";
 
-import { useState, useMemo, useRef, useCallback } from "react";
-import { useAppState, RegressionResult } from "@/lib/store";
+import { useState, useMemo, useRef, useCallback, useEffect } from "react";
+import { useAppState, RegressionResult, ChatMessage } from "@/lib/store";
+import { sendResultsChatStream } from "@/lib/api";
 import {
-  BarChart3,
-  TrendingUp,
-  Hash,
-  ShieldCheck,
   Search,
   ChevronDown,
   ChevronUp,
@@ -16,6 +13,8 @@ import {
   Copy,
   Check,
   Download,
+  Send,
+  Loader2,
 } from "lucide-react";
 import {
   ScatterChart,
@@ -23,9 +22,7 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
-  Tooltip,
   ResponsiveContainer,
-  Cell,
   ReferenceLine,
   ErrorBar,
 } from "recharts";
@@ -35,31 +32,6 @@ const API_BASE = "http://localhost:8000";
 
 function plotUrl(filename: string): string {
   return `${API_BASE}/plots/${filename}`;
-}
-
-// ── Stat Card ──────────────────────────────────────────────────────────────
-
-function StatCard({
-  label,
-  value,
-  subtitle,
-  icon: Icon,
-}: {
-  label: string;
-  value: string;
-  subtitle: string;
-  icon: typeof BarChart3;
-}) {
-  return (
-    <div className="bg-card border border-border rounded-xl p-5">
-      <div className="flex items-center justify-between mb-3">
-        <p className="text-sm text-muted-foreground">{label}</p>
-        <Icon className="w-4 h-4 text-muted-foreground" />
-      </div>
-      <p className="text-2xl font-semibold">{value}</p>
-      <p className="text-xs text-muted-foreground mt-1">{subtitle}</p>
-    </div>
-  );
 }
 
 // ── Forest plot fallback (Recharts, used when no server image) ─────────────
@@ -181,34 +153,47 @@ function RegressionModal({
     ([k, v]) => [k.replace(/_/g, " "), String(v)]
   );
 
-  const handleCopy = () => {
-    const lines = [
-      `Regression: ${r.predictor} → ${r.outcome}`,
-      `Model: ${r.model_family}`,
-      `Covariates: ${r.covariates.join(", ") || "None"}`,
-      "",
-      "Statistic\tValue",
-      ...statsRows.map(([k, v]) => `${k}\t${v}`),
-    ];
-    if (assumptionRows.length > 0) {
-      lines.push("", "Assumption Checks\tResult");
-      assumptionRows.forEach(([k, v]) => lines.push(`${k}\t${v}`));
-    }
-    navigator.clipboard.writeText(lines.join("\n")).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  };
-
-  const handleDownloadPlot = useCallback(() => {
+  const handleCopyImage = useCallback(async () => {
     const filename = plotMap?.[r.spec_id];
     if (!filename) return;
-    const link = document.createElement("a");
-    link.href = plotUrl(filename);
-    link.download = `${r.predictor}_${r.model_family.replace(/\s+/g, "_")}.png`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    const url = plotUrl(filename);
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Failed to fetch image");
+      const blob = await response.blob();
+      // ClipboardItem is not universally supported; URL fallback below handles that path.
+      if (typeof ClipboardItem !== "undefined") {
+        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      } else {
+        await navigator.clipboard.writeText(url);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  }, [plotMap, r.spec_id]);
+
+  const handleDownloadPlot = useCallback(async () => {
+    const filename = plotMap?.[r.spec_id];
+    if (!filename) return;
+    try {
+      const resp = await fetch(plotUrl(filename));
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${r.predictor}_${r.model_family.replace(/\s+/g, "_")}.png`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch {
+      // fallback: open in new tab
+      window.open(plotUrl(filename), "_blank");
+    }
   }, [plotMap, r.spec_id, r.predictor, r.model_family]);
 
   const hasPlotImage = !!plotMap?.[r.spec_id];
@@ -246,17 +231,19 @@ function RegressionModal({
                 Download plot
               </button>
             )}
-            <button
-              onClick={handleCopy}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-            >
-              {copied ? (
-                <Check className="w-3 h-3 text-success" />
-              ) : (
-                <Copy className="w-3 h-3" />
-              )}
-              {copied ? "Copied!" : "Copy table"}
-            </button>
+            {hasPlotImage && (
+              <button
+                onClick={handleCopyImage}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+              >
+                {copied ? (
+                  <Check className="w-3 h-3 text-success" />
+                ) : (
+                  <Copy className="w-3 h-3" />
+                )}
+                {copied ? "Copied!" : "Copy image"}
+              </button>
+            )}
             <button
               onClick={onClose}
               className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
@@ -349,8 +336,8 @@ function RegressionModal({
             <p className="text-xs text-muted-foreground">
               <span className="font-medium text-foreground">Publication note:</span>{" "}
               {hasPlotImage
-                ? "Use \"Download plot\" for a 200 DPI publication-ready PNG. Use \"Copy table\" to paste tab-separated data into Excel or Word."
-                : "Use \"Copy table\" above to paste tab-separated data into Excel, Word, or any reference manager."}
+                ? "Use \"Download plot\" for a 200 DPI publication-ready PNG. Use \"Copy image\" to copy the figure to your clipboard."
+                : "Use \"Download plot\" when available to export the figure for reports or manuscripts."}
             </p>
           </div>
         </div>
@@ -454,8 +441,8 @@ type SortDir = "asc" | "desc";
 // ── Main component ─────────────────────────────────────────────────────────
 
 export function ResultsPhase() {
-  const { results } = useAppState();
-  const [tab, setTab] = useState<"summary" | "regressions">("regressions");
+  const { results, sessionId } = useAppState();
+  const [tab, setTab] = useState<"regressions" | "chat">("regressions");
   const [viewMode, setViewMode] = useState<"list" | "grid">("grid");
   const [search, setSearch] = useState("");
   const [filterModel, setFilterModel] = useState<string>("all");
@@ -464,23 +451,59 @@ export function ResultsPhase() {
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [selectedReg, setSelectedReg] = useState<RegressionResult | null>(null);
 
+  // AI Chat state
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages]);
+
+  useEffect(() => {
+    const el = chatInputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const maxH = 140;
+    el.style.height = `${Math.min(el.scrollHeight, maxH)}px`;
+    el.style.overflowY = el.scrollHeight > maxH ? "auto" : "hidden";
+  }, [chatInput]);
+
+  const handleChatSend = async () => {
+    if (!chatInput.trim() || !sessionId || chatLoading) return;
+    const userMsg: ChatMessage = { role: "user", content: chatInput.trim() };
+    const updated = [...chatMessages, userMsg];
+    setChatMessages([...updated, { role: "assistant", content: "" }]);
+    setChatInput("");
+    setChatLoading(true);
+
+    try {
+      let streamed = "";
+      const data = await sendResultsChatStream(sessionId, userMsg.content, updated, {
+        onChunk: (chunk) => {
+          streamed += chunk;
+          setChatMessages([...updated, { role: "assistant", content: streamed }]);
+        },
+      });
+      setChatMessages([
+        ...updated,
+        { role: "assistant", content: String(data.response || streamed) },
+      ]);
+    } catch {
+      setChatMessages([
+        ...updated,
+        { role: "assistant", content: "Sorry, something went wrong. Please try again." },
+      ]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
   if (!results) return null;
 
   const plotMap = results.plot_map;
-
-  const specCurveData = useMemo(() => {
-    return results.regressions
-      .map((r, i) => ({
-        index: i,
-        coefficient: r.coefficient,
-        significant: r.significant_corrected,
-        model: r.model_family,
-        predictor: r.predictor,
-        p_value: r.p_value_corrected,
-      }))
-      .sort((a, b) => a.coefficient - b.coefficient)
-      .map((d, i) => ({ ...d, index: i }));
-  }, [results.regressions]);
 
   const modelFamilies = useMemo(() => {
     return [...new Set(results.regressions.map((r) => r.model_family))];
@@ -536,8 +559,6 @@ export function ResultsPhase() {
     );
   };
 
-  const hasSpecCurveImage = !!plotMap?.["spec_curve"];
-
   return (
     <>
       {selectedReg && (
@@ -554,55 +575,21 @@ export function ResultsPhase() {
           </div>
         </div>
 
-        {/* Stat Cards */}
-        <div className="grid grid-cols-4 gap-4 px-6 py-4">
-          <StatCard
-            label="Robustness"
-            value={`${results.robustness_pct}%`}
-            subtitle="of specs support hypothesis"
-            icon={ShieldCheck}
-          />
-          <StatCard
-            label="Total Specifications"
-            value={results.total_specs.toString()}
-            subtitle={`${results.significant_specs} significant after FDR`}
-            icon={Hash}
-          />
-          <StatCard
-            label="Mean Effect Size"
-            value={results.mean_effect_size.toFixed(3)}
-            subtitle={
-              Math.abs(results.mean_effect_size) < 0.2
-                ? "Small effect"
-                : Math.abs(results.mean_effect_size) < 0.5
-                ? "Medium effect"
-                : "Large effect"
-            }
-            icon={TrendingUp}
-          />
-          <StatCard
-            label="Outcome Type"
-            value={results.outcome_type}
-            subtitle={results.outcome_variable}
-            icon={BarChart3}
-          />
-        </div>
-
         {/* Tabs */}
         <div className="px-6 border-b border-border">
           <div className="flex gap-6">
-            {(["regressions", "summary"] as const).map((t) => (
+            {(["regressions", "chat"] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
-                className={`pb-3 text-sm font-medium border-b-2 transition-colors capitalize ${
+                className={`pb-3 pt-3 text-sm font-medium border-b-2 transition-colors ${
                   tab === t
                     ? "border-foreground text-foreground"
                     : "border-transparent text-muted-foreground hover:text-foreground"
                 }`}
               >
-                {t === "summary"
-                  ? "Summary"
+                {t === "chat"
+                  ? "AI Chat"
                   : `All Regressions (${results.regressions.length})`}
               </button>
             ))}
@@ -610,101 +597,75 @@ export function ResultsPhase() {
         </div>
 
         {/* Tab Content */}
-        <div className="flex-1 overflow-y-auto px-6 py-4">
-          {tab === "summary" ? (
-            <div className="space-y-6">
-              {/* Summary — rendered as markdown */}
-              <div className="bg-card border border-border rounded-xl p-6">
-                <h3 className="text-sm font-medium mb-3">AI Summary</h3>
-                <div className="text-sm leading-relaxed">
-                  <Markdown content={results.summary} />
+        <div className="flex-1 overflow-hidden flex flex-col">
+          {tab === "chat" ? (
+            <div className="flex-1 flex flex-col overflow-hidden">
+              <div className="flex-1 overflow-y-auto py-6">
+                <div className="max-w-2xl mx-auto px-6 space-y-6">
+                  {chatMessages.length === 0 && (
+                    <div className="text-center py-12">
+                      <p className="text-sm text-muted-foreground">
+                        Ask questions about your analysis results — robustness, effect sizes, model agreement, and more.
+                      </p>
+                    </div>
+                  )}
+                  {chatMessages.map((msg, i) => (
+                    <div
+                      key={i}
+                      className={`flex ${
+                        msg.role === "user" ? "justify-end" : "justify-start"
+                      }`}
+                    >
+                      {msg.role === "user" ? (
+                        <div className="max-w-[75%] bg-accent rounded-2xl px-4 py-2.5 text-sm leading-relaxed">
+                          <p className="whitespace-pre-wrap">{msg.content}</p>
+                        </div>
+                      ) : (
+                        <div className="w-full text-sm leading-relaxed text-foreground">
+                          <Markdown content={msg.content} />
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {chatLoading && chatMessages[chatMessages.length - 1]?.content === "" && (
+                    <div className="flex justify-start">
+                      <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                    </div>
+                  )}
+                  <div ref={chatEndRef} />
                 </div>
               </div>
 
-              {/* Specification Curve */}
-              <div className="bg-card border border-border rounded-xl p-6">
-                <h3 className="text-sm font-medium mb-4">Specification Curve</h3>
-                {hasSpecCurveImage ? (
-                  <div className="flex flex-col items-center">
-                    <img
-                      src={plotUrl(plotMap!["spec_curve"])}
-                      alt="Specification curve"
-                      className="w-full max-w-3xl h-auto rounded-lg"
+              <div className="p-4 flex-shrink-0">
+                <div className="max-w-2xl mx-auto">
+                  <div className="flex items-end gap-2 bg-accent border border-border rounded-2xl px-4 py-2 focus-within:ring-1 focus-within:ring-ring transition-shadow">
+                    <textarea
+                      ref={chatInputRef}
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          handleChatSend();
+                        }
+                      }}
+                      placeholder="Ask about robustness, effect sizes, model agreement..."
+                      rows={1}
+                      className="flex-1 resize-none bg-transparent text-sm leading-relaxed text-foreground placeholder:text-muted-foreground focus:outline-none py-1"
                     />
-                    <div className="mt-3 flex items-center gap-3">
-                      <a
-                        href={plotUrl(plotMap!["spec_curve"])}
-                        download="specification_curve.png"
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-                      >
-                        <Download className="w-3 h-3" />
-                        Download plot
-                      </a>
-                    </div>
+                    <button
+                      onClick={handleChatSend}
+                      disabled={!chatInput.trim() || chatLoading}
+                      className="p-1.5 rounded-lg bg-foreground text-background hover:bg-foreground/90 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                    </button>
                   </div>
-                ) : (
-                  <>
-                    <p className="text-xs text-muted-foreground mb-4">
-                      Each dot is one model specification, sorted by effect size. Green = significant after FDR correction.
-                    </p>
-                    <ResponsiveContainer width="100%" height={300}>
-                      <ScatterChart margin={{ top: 10, right: 20, bottom: 20, left: 20 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                        <XAxis
-                          dataKey="index"
-                          type="number"
-                          name="Specification"
-                          tick={{ fontSize: 12, fill: "#64748b" }}
-                          label={{
-                            value: "Specification (sorted by effect size)",
-                            position: "bottom",
-                            offset: 5,
-                            style: { fontSize: 11, fill: "#64748b" },
-                          }}
-                        />
-                        <YAxis
-                          dataKey="coefficient"
-                          type="number"
-                          name="Coefficient"
-                          tick={{ fontSize: 12, fill: "#64748b" }}
-                          label={{
-                            value: "Coefficient",
-                            angle: -90,
-                            position: "insideLeft",
-                            style: { fontSize: 11, fill: "#64748b" },
-                          }}
-                        />
-                        <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="5 5" />
-                        <Tooltip
-                          contentStyle={{
-                            backgroundColor: "#ffffff",
-                            border: "1px solid #e2e8f0",
-                            borderRadius: "8px",
-                            fontSize: "12px",
-                            color: "#09090b",
-                          }}
-                          formatter={(value) => [
-                            typeof value === "number" ? value.toFixed(4) : String(value),
-                          ]}
-                          labelFormatter={() => ""}
-                        />
-                        <Scatter data={specCurveData} name="Specifications">
-                          {specCurveData.map((entry, i) => (
-                            <Cell
-                              key={i}
-                              fill={entry.significant ? "#22c55e" : "#cbd5e1"}
-                              opacity={entry.significant ? 0.9 : 0.5}
-                            />
-                          ))}
-                        </Scatter>
-                      </ScatterChart>
-                    </ResponsiveContainer>
-                  </>
-                )}
+                </div>
               </div>
             </div>
           ) : (
-            <div className="space-y-4">
+            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
               {/* Filters + view toggle */}
               <div className="flex gap-3 items-center">
                 <div className="relative flex-1 max-w-sm">

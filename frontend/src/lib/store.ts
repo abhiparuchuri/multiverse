@@ -55,7 +55,6 @@ export interface RegressionResult {
 
 export interface AnalysisResults {
   session_id: string;
-  summary: string;
   robustness_pct: number;
   total_specs: number;
   significant_specs: number;

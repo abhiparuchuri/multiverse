@@ -202,6 +202,10 @@ def generate_spec_curve_plot(regressions: list[dict], outcome: str, outcome_type
 def generate_all_plots(results: dict) -> dict:
     """Generate all plots for the analysis results.
     Returns a dict mapping spec_id -> plot filename, plus 'spec_curve' key."""
+    # Clear previous plots
+    for f in PLOT_DIR.glob("*.png"):
+        f.unlink()
+
     plot_map = {}
 
     # Individual forest plots

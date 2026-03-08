@@ -201,6 +201,52 @@ export async function sendIntentChatStream(
   return finalData;
 }
 
+export type ResultsChatStreamFinal = {
+  type?: "final";
+  response: string;
+};
+
+export async function sendResultsChatStream(
+  sessionId: string,
+  message: string,
+  chatHistory: { role: string; content: string }[],
+  handlers: { onChunk?: (chunk: string) => void } = {}
+): Promise<ResultsChatStreamFinal> {
+  const res = await fetch(`${API_BASE}/results-chat-stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId,
+      message,
+      chat_history: chatHistory,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`Results chat stream failed with status ${res.status}`);
+  }
+
+  let finalData: ResultsChatStreamFinal | null = null;
+  let streamError: string | null = null;
+
+  await consumeNdjsonStream(res, (event) => {
+    if (event.type === "chunk") {
+      handlers.onChunk?.(String(event.content || ""));
+      return;
+    }
+    if (event.type === "error") {
+      streamError = String(event.error || "Unknown stream error");
+      return;
+    }
+    if (event.type === "final") {
+      finalData = event as unknown as ResultsChatStreamFinal;
+    }
+  });
+
+  if (streamError) throw new Error(streamError);
+  if (!finalData) throw new Error("Results chat stream ended without final payload.");
+  return finalData;
+}
+
 export async function runAnalysis(sessionId: string) {
   const res = await fetch(`${API_BASE}/analyze`, {
     method: "POST",

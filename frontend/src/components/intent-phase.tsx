@@ -199,7 +199,7 @@ export function IntentPhase() {
         <div>
           <h2 className="text-sm font-semibold">Study Intent</h2>
           <p className="text-xs text-muted-foreground">
-            Define your hypothesis — this becomes your pre-registration
+            Define your outcome, predictors, and covariates
           </p>
         </div>
         {intentReady && (
