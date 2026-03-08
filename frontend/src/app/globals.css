@@ -1,0 +1,86 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
+  --color-card: var(--card);
+  --color-card-foreground: var(--fg);
+  --color-popover: var(--bg);
+  --color-popover-foreground: var(--fg);
+  --color-primary: var(--fg);
+  --color-primary-foreground: var(--bg);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--fg);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-fg);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--fg);
+  --color-destructive: #7f1d1d;
+  --color-destructive-foreground: #fafafa;
+  --color-border: var(--border);
+  --color-input: var(--border);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--muted-fg);
+  --color-sidebar-active: var(--fg);
+  --color-success: #22c55e;
+  --color-warning: #eab308;
+  --color-info: #3b82f6;
+  --radius: 0.5rem;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Dark theme (default) */
+:root {
+  --bg: #09090b;
+  --fg: #fafafa;
+  --card: #0a0a0f;
+  --secondary: #27272a;
+  --muted: #27272a;
+  --muted-fg: #a1a1aa;
+  --accent: #27272a;
+  --border: #27272a;
+  --ring: #d4d4d8;
+  --sidebar: #0a0a0f;
+}
+
+/* Light theme */
+.light {
+  --bg: #ffffff;
+  --fg: #09090b;
+  --card: #f9fafb;
+  --secondary: #f1f5f9;
+  --muted: #f1f5f9;
+  --muted-fg: #64748b;
+  --accent: #f1f5f9;
+  --border: #e2e8f0;
+  --ring: #94a3b8;
+  --sidebar: #f8fafc;
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  transition: background-color 0.2s, color 0.2s;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted-foreground);
+}
