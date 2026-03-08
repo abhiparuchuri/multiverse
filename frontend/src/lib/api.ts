@@ -34,6 +34,12 @@ export type ChatStreamFinal = {
   modifications?: unknown[];
 };
 
+export type IntentDraft = {
+  outcome_variable?: string;
+  predictors?: string[];
+  confounders?: string[];
+};
+
 export type IntentStreamFinal = {
   type?: "final";
   response?: string;
@@ -41,7 +47,7 @@ export type IntentStreamFinal = {
   committed?: boolean;
   intent?: unknown;
   missing_fields?: string[];
-  intent_draft?: unknown;
+  intent_draft?: IntentDraft | null;
   covariates_auto_assigned?: boolean;
 };
 

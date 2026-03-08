@@ -186,19 +186,17 @@ def generate_scatter_model_plot(df: pd.DataFrame, regression: dict) -> str:
     ax.spines["bottom"].set_color(COLOR_GRID)
 
     p_str = "p < 0.001" if p_val < 0.001 else f"p = {p_val:.3f}"
+    stats_line = f"β = {coeff:.4f}  |  {p_str}  |  n = {len(x)}"
+
     subtitle = model_family
     if covariates:
-        subtitle += f"  |  adjusted for {', '.join(covariates[:3])}"
-        if len(covariates) > 3:
-            subtitle += f" +{len(covariates) - 3} more"
+        subtitle += f"  |  adjusted for {', '.join(covariates[:2])}"
+        if len(covariates) > 2:
+            subtitle += f" +{len(covariates) - 2} more"
 
-    ax.set_title(f"{predictor} → {outcome}", fontsize=11, fontweight="600", pad=10, loc="left", color=COLOR_TEXT)
-    ax.text(0.0, 1.02, subtitle, transform=ax.transAxes, fontsize=8, color=COLOR_SUBTITLE, va="bottom")
-    ax.text(
-        1.0, 1.02,
-        f"β = {coeff:.4f}  |  {p_str}  |  n = {len(x)}",
-        transform=ax.transAxes, ha="right", fontsize=8, color=COLOR_SUBTITLE, va="bottom",
-    )
+    ax.set_title(f"{predictor} → {outcome}", fontsize=11, fontweight="600", pad=36, loc="left", color=COLOR_TEXT)
+    ax.text(0.0, 1.15, stats_line, transform=ax.transAxes, fontsize=8, color=COLOR_SUBTITLE, va="bottom")
+    ax.text(0.0, 1.03, subtitle, transform=ax.transAxes, fontsize=8, color=COLOR_SUBTITLE, va="bottom")
 
     filename = f"{regression['spec_id']}.png"
     filepath = PLOT_DIR / filename

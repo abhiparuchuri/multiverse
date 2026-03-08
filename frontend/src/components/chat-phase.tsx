@@ -393,7 +393,7 @@ export function ChatPhase() {
       <div className="flex-1 flex overflow-hidden">
         {/* Chat */}
         <div className="flex-1 flex flex-col min-w-0">
-          <div className="flex-1 overflow-y-auto py-6">
+          <div className="flex-1 overflow-y-auto hide-scrollbar py-6">
             <div className="max-w-2xl mx-auto px-6 space-y-6">
               {chatMessages.map((msg, i) => (
                 <div

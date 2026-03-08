@@ -501,14 +501,6 @@ async def intent_chat(request: IntentChatRequest):
         profile=profile,
         chat_history=convo,
     )
-    if covariates_auto_assigned and intent_draft.get("confounders"):
-        covars = ", ".join(intent_draft["confounders"])
-        response = (
-            f"{response}\n\n"
-            f"Proposed covariates (auto-assigned as all non-predictor variables): {covars}.\n"
-            f"Tell me if you want to remove or add any covariates before committing."
-        )
-
     return {
         "response": response,
         "intent_ready": intent_ready,
@@ -596,14 +588,6 @@ async def intent_chat_stream(request: IntentChatRequest):
                     profile=profile,
                     chat_history=convo,
                 )
-                if covariates_auto_assigned and intent_draft and intent_draft.get("confounders"):
-                    covars = ", ".join(intent_draft["confounders"])
-                    response = (
-                        f"{response}\n\n"
-                        f"Proposed covariates (auto-assigned as all non-predictor variables): {covars}.\n"
-                        f"Tell me if you want to remove or add any covariates before committing."
-                    )
-
             yield json.dumps({
                 "type": "final",
                 "response": response,

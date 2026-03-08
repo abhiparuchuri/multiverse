@@ -2,17 +2,12 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useAppState, ChatMessage, ColumnProfile, DataModification } from "@/lib/store";
-import { sendIntentChat, sendIntentChatStream } from "@/lib/api";
-import { Send, Loader2, Lock, AlertTriangle, ChevronRight, Sparkles, ArrowLeftRight, Type, Filter, User } from "lucide-react";
+import { sendIntentChatStream, IntentDraft } from "@/lib/api";
+import { Send, Loader2, Lock, AlertTriangle, ChevronRight, Sparkles, ArrowLeftRight, Type, Filter, User, Target, FlaskConical, Shield, X, Plus } from "lucide-react";
 import { Markdown } from "@/components/markdown";
 
 type PanelTab = "variables" | "modifications";
-type IntentDraft = {
-  outcome_variable: string;
-  predictors: string[];
-  confounders: string[];
-  hypothesis?: string;
-};
+type DesignTab = "outcome" | "predictors" | "covariates";
 
 function DistributionBar({ profile }: { profile: ColumnProfile }) {
   const bins = profile.histogram;
@@ -81,6 +76,218 @@ function ReadOnlyModificationRow({ mod }: { mod: DataModification }) {
   );
 }
 
+function VariableChip({
+  name,
+  onRemove,
+}: {
+  name: string;
+  onRemove?: () => void;
+}) {
+  return (
+    <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] bg-foreground text-background font-medium">
+      {name}
+      {onRemove && (
+        <button
+          onClick={onRemove}
+          className="hover:bg-background/20 rounded-full p-0.5 transition-colors"
+        >
+          <X className="w-2.5 h-2.5" />
+        </button>
+      )}
+    </span>
+  );
+}
+
+function AddVariableDropdown({
+  options,
+  onAdd,
+}: {
+  options: string[];
+  onAdd: (name: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  if (options.length === 0) return null;
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] border border-dashed border-border text-muted-foreground hover:text-foreground hover:border-foreground/40 transition-colors"
+      >
+        <Plus className="w-2.5 h-2.5" />
+        Add
+      </button>
+      {open && (
+        <div className="absolute top-full left-0 mt-1 z-10 bg-popover border border-border rounded-lg shadow-lg py-1 max-h-40 overflow-y-auto min-w-[140px]">
+          {options.map((name) => (
+            <button
+              key={name}
+              onClick={() => {
+                onAdd(name);
+                setOpen(false);
+              }}
+              className="w-full text-left px-3 py-1.5 text-[11px] hover:bg-accent transition-colors"
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StudyDesignPanel({
+  intentDraft,
+  designTab,
+  setDesignTab,
+  allColumns,
+  onUpdateDraft,
+  onCollapse,
+}: {
+  intentDraft: IntentDraft | null;
+  designTab: DesignTab;
+  setDesignTab: (tab: DesignTab) => void;
+  allColumns: string[];
+  onUpdateDraft: (draft: IntentDraft) => void;
+  onCollapse: () => void;
+}) {
+  const outcome = intentDraft?.outcome_variable || "";
+  const predictors = intentDraft?.predictors || [];
+  const covariates = intentDraft?.confounders || [];
+
+  const usedColumns = new Set([outcome, ...predictors, ...covariates].filter(Boolean));
+  const availableForOutcome = allColumns.filter((c) => c !== outcome && !predictors.includes(c));
+  const availableForPredictors = allColumns.filter((c) => !usedColumns.has(c));
+  const availableForCovariates = allColumns.filter((c) => !usedColumns.has(c));
+
+  const setOutcome = (name: string) => {
+    onUpdateDraft({
+      ...intentDraft,
+      outcome_variable: name,
+      predictors: predictors.filter((p) => p !== name),
+      confounders: covariates.filter((c) => c !== name),
+    });
+  };
+
+  const addPredictor = (name: string) => {
+    onUpdateDraft({
+      ...intentDraft,
+      outcome_variable: outcome,
+      predictors: [...predictors, name],
+      confounders: covariates.filter((c) => c !== name),
+    });
+  };
+
+  const removePredictor = (name: string) => {
+    onUpdateDraft({
+      ...intentDraft,
+      outcome_variable: outcome,
+      predictors: predictors.filter((p) => p !== name),
+      confounders: covariates,
+    });
+  };
+
+  const addCovariate = (name: string) => {
+    onUpdateDraft({
+      ...intentDraft,
+      outcome_variable: outcome,
+      predictors: predictors.filter((p) => p !== name),
+      confounders: [...covariates, name],
+    });
+  };
+
+  const removeCovariate = (name: string) => {
+    onUpdateDraft({
+      ...intentDraft,
+      outcome_variable: outcome,
+      predictors,
+      confounders: covariates.filter((c) => c !== name),
+    });
+  };
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="px-4 pt-2 pb-0 flex-shrink-0 flex items-center justify-between">
+        <p className="text-[11px] font-semibold text-foreground uppercase tracking-wider">Study Design</p>
+        <button
+          onClick={onCollapse}
+          className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+          title="Collapse panel"
+        >
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      </div>
+      <div className="flex px-4 mt-2 gap-1">
+        {([
+          { key: "outcome" as DesignTab, label: "Outcome", icon: Target, count: outcome ? 1 : 0 },
+          { key: "predictors" as DesignTab, label: "Predictors", icon: FlaskConical, count: predictors.length },
+          { key: "covariates" as DesignTab, label: "Covariates", icon: Shield, count: covariates.length },
+        ]).map(({ key, label, count }) => (
+          <button
+            key={key}
+            onClick={() => setDesignTab(key)}
+            className={`px-3 py-1.5 text-[11px] font-medium rounded-t transition-colors border-b-2 flex items-center gap-1.5 ${
+              designTab === key
+                ? "border-foreground text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {label}
+            {count > 0 && (
+              <span className="bg-foreground text-background text-[9px] font-bold rounded-full w-4 h-4 flex items-center justify-center">
+                {count}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+      <div className="border-t border-border px-4 py-3 flex-1 overflow-y-auto">
+        {designTab === "outcome" && (
+          <div>
+            {outcome ? (
+              <div className="flex items-center gap-2">
+                <VariableChip name={outcome} onRemove={() => onUpdateDraft({ ...intentDraft, outcome_variable: "", predictors, confounders: covariates })} />
+              </div>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">Describe your outcome in the chat</p>
+            )}
+          </div>
+        )}
+        {designTab === "predictors" && (
+          <div>
+            {predictors.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {predictors.map((name) => (
+                  <VariableChip key={name} name={name} onRemove={() => removePredictor(name)} />
+                ))}
+                <AddVariableDropdown options={availableForPredictors} onAdd={addPredictor} />
+              </div>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">Describe your predictors in the chat</p>
+            )}
+          </div>
+        )}
+        {designTab === "covariates" && (
+          <div>
+            {covariates.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {covariates.map((name) => (
+                  <VariableChip key={name} name={name} onRemove={() => removeCovariate(name)} />
+                ))}
+                <AddVariableDropdown options={availableForCovariates} onAdd={addCovariate} />
+              </div>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">Covariates will be identified from the chat</p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function IntentPhase() {
   const {
     sessionId,
@@ -99,8 +306,13 @@ export function IntentPhase() {
   const [initializing, setInitializing] = useState(true);
   const [collapsed, setCollapsed] = useState(false);
   const [panelTab, setPanelTab] = useState<PanelTab>("variables");
+  const [designTab, setDesignTab] = useState<DesignTab>("outcome");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  const allColumns = dataProfile
+    ? dataProfile.column_profiles.map((c) => c.name)
+    : [];
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -165,7 +377,9 @@ export function IntentPhase() {
         { role: "assistant", content: String(data.response || streamed) },
       ]);
       setIntentReady(Boolean(data.intent_ready));
-      setIntentDraft((data.intent_draft as IntentDraft) || null);
+      if (data.intent_draft) {
+        setIntentDraft(data.intent_draft);
+      }
     } catch {
       setMessages([
         ...updatedMessages,
@@ -184,43 +398,24 @@ export function IntentPhase() {
     setLoading(true);
 
     try {
-      // Send a commit message to finalize intent
-      const data = await sendIntentChat(
+      const data = await sendIntentChatStream(
         sessionId,
         "__commit__",
         messages,
-        intentDraft || undefined
+        intentDraft || undefined,
+        {}
       );
       if (data.committed) {
         setCompletedPhases([...completedPhases, "intent"]);
         setPhase("analysis");
       }
     } catch {
-      // fallback
       setCompletedPhases([...completedPhases, "intent"]);
       setPhase("analysis");
     } finally {
       setLoading(false);
     }
   };
-
-  const toggleCovariate = (name: string) => {
-    if (!intentDraft) return;
-    const next = intentDraft.confounders.includes(name)
-      ? intentDraft.confounders.filter((c) => c !== name)
-      : [...intentDraft.confounders, name];
-    setIntentDraft({ ...intentDraft, confounders: next });
-  };
-
-  const covariateOptions = dataProfile
-    ? dataProfile.column_profiles
-        .map((c) => c.name)
-        .filter(
-          (name) =>
-            name !== intentDraft?.outcome_variable &&
-            !intentDraft?.predictors?.includes(name)
-        )
-    : [];
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden">
@@ -242,14 +437,14 @@ export function IntentPhase() {
             ) : (
               <Lock className="w-4 h-4" />
             )}
-            Commit & Run Analysis
+            Run Analysis
           </button>
         )}
       </div>
 
       <div className="flex-1 flex overflow-hidden">
         <div className="flex-1 flex flex-col min-w-0">
-          <div className="flex-1 overflow-y-auto py-6">
+          <div className="flex-1 overflow-y-auto hide-scrollbar py-6">
             <div className="max-w-2xl mx-auto px-6 space-y-6">
               {initializing && (
                 <div className="flex justify-start">
@@ -308,35 +503,9 @@ export function IntentPhase() {
                   <Send className="w-3.5 h-3.5" />
                 </button>
               </div>
-              {intentDraft && (
-                <div className="mt-3 rounded-xl border border-border bg-card px-3 py-2.5">
-                  <p className="text-[11px] font-medium text-foreground mb-2">
-                    Proposed Covariates (editable before commit)
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    {covariateOptions.map((name) => {
-                      const active = intentDraft.confounders.includes(name);
-                      return (
-                        <button
-                          key={name}
-                          type="button"
-                          onClick={() => toggleCovariate(name)}
-                          className={`px-2.5 py-1 rounded-full text-[11px] border transition-colors ${
-                            active
-                              ? "bg-foreground text-background border-foreground"
-                              : "bg-background text-muted-foreground border-border hover:text-foreground"
-                          }`}
-                        >
-                          {name}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
               {intentReady && (
                 <p className="text-xs text-center text-muted-foreground mt-2">
-                  Your study intent is ready. Click &quot;Commit & Run Analysis&quot; to lock it in and begin.
+                  Your study intent is ready. Click &quot;Run Analysis&quot; to begin.
                 </p>
               )}
             </div>
@@ -354,50 +523,57 @@ export function IntentPhase() {
             >
               {!collapsed && (
                 <>
-                  <div className="border-b border-border flex-shrink-0">
-                    <div className="flex items-center justify-between px-4 pt-3 pb-0">
-                      <p className="text-xs text-muted-foreground">
-                        {dataProfile.rows.toLocaleString()} rows &middot; {dataProfile.columns} cols &middot;{" "}
-                        {dataProfile.missing_total_pct}% missing
-                      </p>
-                      <button
-                        onClick={() => setCollapsed(true)}
-                        className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-                        title="Collapse panel"
-                      >
-                        <ChevronRight className="w-4 h-4" />
-                      </button>
-                    </div>
-                    <div className="flex px-4 mt-2 gap-1">
-                      <button
-                        onClick={() => setPanelTab("variables")}
-                        className={`px-3 py-1.5 text-[11px] font-medium rounded-t transition-colors border-b-2 ${
-                          panelTab === "variables"
-                            ? "border-foreground text-foreground"
-                            : "border-transparent text-muted-foreground hover:text-foreground"
-                        }`}
-                      >
-                        Variables
-                      </button>
-                      <button
-                        onClick={() => setPanelTab("modifications")}
-                        className={`px-3 py-1.5 text-[11px] font-medium rounded-t transition-colors border-b-2 flex items-center gap-1.5 ${
-                          panelTab === "modifications"
-                            ? "border-foreground text-foreground"
-                            : "border-transparent text-muted-foreground hover:text-foreground"
-                        }`}
-                      >
-                        Modifications
-                        {modifications.length > 0 && (
-                          <span className="bg-foreground text-background text-[9px] font-bold rounded-full w-4 h-4 flex items-center justify-center">
-                            {modifications.length}
-                          </span>
-                        )}
-                      </button>
-                    </div>
+                  {/* Top half: Study Design tracker */}
+                  <div className="basis-1/2 grow-0 shrink-0 min-h-0 flex flex-col border-b border-border">
+                    <StudyDesignPanel
+                      intentDraft={intentDraft}
+                      designTab={designTab}
+                      setDesignTab={setDesignTab}
+                      allColumns={allColumns}
+                      onUpdateDraft={setIntentDraft}
+                      onCollapse={() => setCollapsed(true)}
+                    />
                   </div>
 
-                  <div className="flex-1 overflow-y-auto">
+                  {/* Bottom half: Data Profile (Variables / Modifications) */}
+                  <div className="basis-1/2 grow-0 shrink-0 min-h-0 flex flex-col">
+                    <div className="flex-shrink-0">
+                      <div className="flex items-center justify-between px-4 pt-3 pb-0">
+                        <p className="text-xs text-muted-foreground">
+                          {dataProfile.rows.toLocaleString()} rows &middot; {dataProfile.columns} cols &middot;{" "}
+                          {dataProfile.missing_total_pct}% missing
+                        </p>
+                      </div>
+                      <div className="flex px-4 mt-2 gap-1">
+                        <button
+                          onClick={() => setPanelTab("variables")}
+                          className={`px-3 py-1.5 text-[11px] font-medium rounded-t transition-colors border-b-2 ${
+                            panelTab === "variables"
+                              ? "border-foreground text-foreground"
+                              : "border-transparent text-muted-foreground hover:text-foreground"
+                          }`}
+                        >
+                          Variables
+                        </button>
+                        <button
+                          onClick={() => setPanelTab("modifications")}
+                          className={`px-3 py-1.5 text-[11px] font-medium rounded-t transition-colors border-b-2 flex items-center gap-1.5 ${
+                            panelTab === "modifications"
+                              ? "border-foreground text-foreground"
+                              : "border-transparent text-muted-foreground hover:text-foreground"
+                          }`}
+                        >
+                          Modifications
+                          {modifications.length > 0 && (
+                            <span className="bg-foreground text-background text-[9px] font-bold rounded-full w-4 h-4 flex items-center justify-center">
+                              {modifications.length}
+                            </span>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto border-t border-border">
                     {panelTab === "variables" ? (
                       <div className="overflow-x-auto">
                         <table className="w-full min-w-[460px]">
@@ -432,6 +608,7 @@ export function IntentPhase() {
                         ))}
                       </div>
                     )}
+                    </div>
                   </div>
                 </>
               )}
@@ -441,14 +618,14 @@ export function IntentPhase() {
               <button
                 onClick={() => setCollapsed(false)}
                 className="flex-shrink-0 w-7 border-l border-border bg-accent/30 hover:bg-accent transition-colors flex flex-col items-center justify-center gap-2 text-muted-foreground hover:text-foreground"
-                title="Expand variables panel"
+                title="Expand panel"
               >
                 <ChevronRight className="w-3.5 h-3.5 rotate-180" />
                 <span
                   className="text-[9px] font-medium uppercase tracking-widest"
                   style={{ writingMode: "vertical-rl" }}
                 >
-                  Variables
+                  Design
                 </span>
               </button>
             )}
