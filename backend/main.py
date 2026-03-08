@@ -2,6 +2,7 @@ import uuid
 import io
 import re
 import json
+import asyncio
 import traceback
 from typing import Optional
 
@@ -10,12 +11,20 @@ import pandas as pd
 from scipy import stats
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
 from analysis_engine import run_multiverse_analysis
 from llm import generate_data_profile_chat, generate_chat_response, generate_intent_chat, extract_intent_from_conversation, generate_summary
+from plot_generator import generate_all_plots, PLOT_DIR
 
 app = FastAPI(title="Multiverse API")
+
+# Serve generated plot images
+app.mount("/plots", StaticFiles(directory=str(PLOT_DIR)), name="plots")
 
 app.add_middleware(
     CORSMiddleware,
@@ -244,6 +253,12 @@ def _apply_variable_edits(session: dict, edits: list[dict], source: str = "ai") 
     return new_mods
 
 
+def _iter_text_chunks(text: str, size: int = 24):
+    """Yield fixed-size text chunks for incremental UI streaming."""
+    for i in range(0, len(text), size):
+        yield text[i : i + size]
+
+
 @app.post("/chat")
 async def chat(request: ChatRequest):
     """Send a chat message about the data."""
@@ -280,6 +295,55 @@ async def chat(request: ChatRequest):
     if new_mods:
         result["modifications"] = new_mods
     return result
+
+
+@app.post("/chat-stream")
+async def chat_stream(request: ChatRequest):
+    """Stream chat response chunks, then emit final metadata event."""
+    session = sessions.get(request.session_id)
+    if not session:
+        async def missing_session():
+            payload = {"type": "error", "error": "Session not found"}
+            yield json.dumps(payload) + "\n"
+        return StreamingResponse(missing_session(), media_type="application/x-ndjson")
+
+    async def event_stream():
+        try:
+            response = generate_chat_response(
+                session["profile"],
+                session["chat_history"],
+                request.message,
+            )
+
+            clean_response, edits = _parse_variable_edits(response)
+            new_mods = []
+            if edits:
+                new_mods = _apply_variable_edits(session, edits, source="ai")
+
+            clean_response, transform = _parse_data_transform(clean_response)
+            if transform:
+                transform_mod = _apply_transform(session, transform)
+                if transform_mod:
+                    new_mods.append(transform_mod)
+
+            session["chat_history"].append({"role": "user", "content": request.message})
+            session["chat_history"].append({"role": "assistant", "content": clean_response})
+
+            for chunk in _iter_text_chunks(clean_response):
+                yield json.dumps({"type": "chunk", "content": chunk}) + "\n"
+                await asyncio.sleep(0)
+
+            final_payload = {"type": "final", "response": clean_response}
+            if edits or transform:
+                final_payload["profile_updated"] = True
+                final_payload["profile"] = session["profile"]
+            if new_mods:
+                final_payload["modifications"] = new_mods
+            yield json.dumps(final_payload) + "\n"
+        except Exception as e:
+            yield json.dumps({"type": "error", "error": str(e)}) + "\n"
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
 @app.post("/update-variable")
@@ -410,6 +474,68 @@ async def intent_chat(request: IntentChatRequest):
     return {"response": response, "intent_ready": intent_ready}
 
 
+@app.post("/intent-chat-stream")
+async def intent_chat_stream(request: IntentChatRequest):
+    """Stream study intent chat response chunks, then emit final metadata event."""
+    session = sessions.get(request.session_id)
+    if not session:
+        async def missing_session():
+            payload = {"type": "error", "error": "Session not found"}
+            yield json.dumps(payload) + "\n"
+        return StreamingResponse(missing_session(), media_type="application/x-ndjson")
+
+    profile = session["profile"]
+    columns = [c["name"] for c in profile["column_profiles"]]
+
+    async def event_stream():
+        try:
+            if request.message == "__commit__":
+                intent = extract_intent_from_conversation(
+                    profile=profile,
+                    columns=columns,
+                    chat_history=request.chat_history,
+                )
+                intent["timestamp"] = pd.Timestamp.now().isoformat()
+                session["intent"] = intent
+                yield json.dumps({"type": "final", "committed": True, "intent": intent}) + "\n"
+                return
+
+            if request.message == "__init__":
+                response = generate_intent_chat(
+                    profile=profile,
+                    columns=columns,
+                    chat_history=[],
+                    user_message=None,
+                )
+                for chunk in _iter_text_chunks(response):
+                    yield json.dumps({"type": "chunk", "content": chunk}) + "\n"
+                    await asyncio.sleep(0)
+                yield json.dumps({"type": "final", "response": response, "intent_ready": False}) + "\n"
+                return
+
+            response = generate_intent_chat(
+                profile=profile,
+                columns=columns,
+                chat_history=request.chat_history,
+                user_message=request.message,
+            )
+
+            intent_ready = _check_intent_completeness(request.chat_history + [
+                {"role": "user", "content": request.message},
+                {"role": "assistant", "content": response},
+            ])
+
+            for chunk in _iter_text_chunks(response):
+                yield json.dumps({"type": "chunk", "content": chunk}) + "\n"
+                await asyncio.sleep(0)
+
+            yield json.dumps({"type": "final", "response": response, "intent_ready": intent_ready}) + "\n"
+        except Exception as e:
+            yield json.dumps({"type": "error", "error": str(e)}) + "\n"
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
+
 def _check_intent_completeness(chat_history: list[dict]) -> bool:
     """Simple heuristic: intent is ready if conversation has enough back-and-forth."""
     user_messages = [m for m in chat_history if m.get("role") == "user"]
@@ -447,6 +573,14 @@ async def analyze(request: AnalyzeRequest):
         summary = generate_summary(results, intent)
         results["summary"] = summary
         results["session_id"] = request.session_id
+
+        # Generate publication-ready plots
+        try:
+            plot_map = generate_all_plots(results)
+            results["plot_map"] = plot_map
+        except Exception as plot_err:
+            print(f"Plot generation failed: {plot_err}")
+            results["plot_map"] = {}
 
         return results
     except Exception as e:

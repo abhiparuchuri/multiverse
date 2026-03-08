@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { useAppState, ChatMessage, ColumnProfile, DataModification } from "@/lib/store";
-import { sendChatMessage, updateVariable, revertModification } from "@/lib/api";
+import { useAppState, ChatMessage, ColumnProfile, DataModification, DataProfile } from "@/lib/store";
+import { sendChatMessageStream, updateVariable, revertModification } from "@/lib/api";
 import {
   Send,
   Loader2,
@@ -281,30 +281,38 @@ export function ChatPhase() {
   const handleSend = async () => {
     if (!input.trim() || !sessionId || loading) return;
     const userMsg: ChatMessage = { role: "user", content: input.trim() };
-    setChatMessages([...chatMessages, userMsg]);
+    const baseMessages = [...chatMessages, userMsg];
+    setChatMessages([...baseMessages, { role: "assistant", content: "" }]);
     setInput("");
     setLoading(true);
 
     try {
-      const data = await sendChatMessage(sessionId, userMsg.content);
+      let streamed = "";
+      const data = await sendChatMessageStream(sessionId, userMsg.content, {
+        onChunk: (chunk) => {
+          streamed += chunk;
+          setChatMessages([...baseMessages, { role: "assistant", content: streamed }]);
+        },
+      });
+
+      const finalResponse = (data.response as string) || streamed;
       setChatMessages([
-        ...chatMessages,
-        userMsg,
-        { role: "assistant", content: data.response },
+        ...baseMessages,
+        { role: "assistant", content: finalResponse },
       ]);
       if (data.profile_updated && data.profile) {
-        setDataProfile(data.profile);
-        setColumns(data.profile.column_profiles.map((c: ColumnProfile) => c.name));
+        const profile = data.profile as DataProfile;
+        setDataProfile(profile);
+        setColumns(profile.column_profiles.map((c: ColumnProfile) => c.name));
       }
-      if (data.modifications) {
-        for (const mod of data.modifications) {
+      if (Array.isArray(data.modifications)) {
+        for (const mod of data.modifications as DataModification[]) {
           addModification(mod as DataModification);
         }
       }
     } catch {
       setChatMessages([
-        ...chatMessages,
-        userMsg,
+        ...baseMessages,
         {
           role: "assistant",
           content: "Sorry, something went wrong. Please try again.",

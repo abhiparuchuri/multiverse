@@ -63,6 +63,7 @@ export interface AnalysisResults {
   outcome_variable: string;
   outcome_type: string;
   regressions: RegressionResult[];
+  plot_map?: Record<string, string>;
 }
 
 export interface DataModification {

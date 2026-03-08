@@ -19,6 +19,98 @@ export async function sendChatMessage(sessionId: string, message: string) {
   return res.json();
 }
 
+type StreamEvent = {
+  type: "chunk" | "final" | "error";
+  content?: string;
+  error?: string;
+  [key: string]: unknown;
+};
+
+export type ChatStreamFinal = {
+  type?: "final";
+  response: string;
+  profile_updated?: boolean;
+  profile?: unknown;
+  modifications?: unknown[];
+};
+
+export type IntentStreamFinal = {
+  type?: "final";
+  response?: string;
+  intent_ready?: boolean;
+  committed?: boolean;
+  intent?: unknown;
+};
+
+async function consumeNdjsonStream(
+  res: Response,
+  onEvent: (event: StreamEvent) => void
+) {
+  if (!res.body) {
+    throw new Error("Streaming not supported by the browser.");
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let newlineIdx = buffer.indexOf("\n");
+    while (newlineIdx !== -1) {
+      const line = buffer.slice(0, newlineIdx).trim();
+      buffer = buffer.slice(newlineIdx + 1);
+      if (line) {
+        onEvent(JSON.parse(line) as StreamEvent);
+      }
+      newlineIdx = buffer.indexOf("\n");
+    }
+  }
+
+  const finalLine = buffer.trim();
+  if (finalLine) {
+    onEvent(JSON.parse(finalLine) as StreamEvent);
+  }
+}
+
+export async function sendChatMessageStream(
+  sessionId: string,
+  message: string,
+  handlers: { onChunk?: (chunk: string) => void } = {}
+): Promise<ChatStreamFinal> {
+  const res = await fetch(`${API_BASE}/chat-stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, message }),
+  });
+  if (!res.ok) {
+    throw new Error(`Chat stream failed with status ${res.status}`);
+  }
+
+  let finalData: ChatStreamFinal | null = null;
+  let streamError: string | null = null;
+
+  await consumeNdjsonStream(res, (event) => {
+    if (event.type === "chunk") {
+      handlers.onChunk?.(String(event.content || ""));
+      return;
+    }
+    if (event.type === "error") {
+      streamError = String(event.error || "Unknown stream error");
+      return;
+    }
+    if (event.type === "final") {
+      finalData = event as unknown as ChatStreamFinal;
+    }
+  });
+
+  if (streamError) throw new Error(streamError);
+  if (!finalData) throw new Error("Chat stream ended without final payload.");
+  return finalData;
+}
+
 export async function updateVariable(
   sessionId: string,
   originalName: string,
@@ -66,6 +158,47 @@ export async function sendIntentChat(
     }),
   });
   return res.json();
+}
+
+export async function sendIntentChatStream(
+  sessionId: string,
+  message: string,
+  chatHistory: { role: string; content: string }[],
+  handlers: { onChunk?: (chunk: string) => void } = {}
+): Promise<IntentStreamFinal> {
+  const res = await fetch(`${API_BASE}/intent-chat-stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId,
+      message,
+      chat_history: chatHistory,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`Intent stream failed with status ${res.status}`);
+  }
+
+  let finalData: IntentStreamFinal | null = null;
+  let streamError: string | null = null;
+
+  await consumeNdjsonStream(res, (event) => {
+    if (event.type === "chunk") {
+      handlers.onChunk?.(String(event.content || ""));
+      return;
+    }
+    if (event.type === "error") {
+      streamError = String(event.error || "Unknown stream error");
+      return;
+    }
+    if (event.type === "final") {
+      finalData = event as unknown as IntentStreamFinal;
+    }
+  });
+
+  if (streamError) throw new Error(streamError);
+  if (!finalData) throw new Error("Intent stream ended without final payload.");
+  return finalData;
 }
 
 export async function runAnalysis(sessionId: string) {

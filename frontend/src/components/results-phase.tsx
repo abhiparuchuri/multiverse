@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo, useRef, useCallback } from "react";
 import { useAppState, RegressionResult } from "@/lib/store";
 import {
   BarChart3,
@@ -15,6 +15,7 @@ import {
   X,
   Copy,
   Check,
+  Download,
 } from "lucide-react";
 import {
   ScatterChart,
@@ -28,6 +29,13 @@ import {
   ReferenceLine,
   ErrorBar,
 } from "recharts";
+import { Markdown } from "@/components/markdown";
+
+const API_BASE = "http://localhost:8000";
+
+function plotUrl(filename: string): string {
+  return `${API_BASE}/plots/${filename}`;
+}
 
 // ── Stat Card ──────────────────────────────────────────────────────────────
 
@@ -54,9 +62,9 @@ function StatCard({
   );
 }
 
-// ── Forest plot for a single regression ───────────────────────────────────
+// ── Forest plot fallback (Recharts, used when no server image) ─────────────
 
-function ForestPlot({
+function ForestPlotFallback({
   r,
   compact = false,
 }: {
@@ -109,13 +117,43 @@ function ForestPlot({
   );
 }
 
+// ── Plot Image with fallback ──────────────────────────────────────────────
+
+function PlotImage({
+  specId,
+  plotMap,
+  regression,
+  compact = false,
+}: {
+  specId: string;
+  plotMap?: Record<string, string>;
+  regression: RegressionResult;
+  compact?: boolean;
+}) {
+  const filename = plotMap?.[specId];
+  if (!filename) {
+    return <ForestPlotFallback r={regression} compact={compact} />;
+  }
+
+  return (
+    <img
+      src={plotUrl(filename)}
+      alt={`Forest plot: ${regression.predictor} → ${regression.outcome}`}
+      className="w-full h-auto"
+      loading="lazy"
+    />
+  );
+}
+
 // ── Regression Detail Modal ────────────────────────────────────────────────
 
 function RegressionModal({
   r,
+  plotMap,
   onClose,
 }: {
   r: RegressionResult;
+  plotMap?: Record<string, string>;
   onClose: () => void;
 }) {
   const [copied, setCopied] = useState(false);
@@ -133,8 +171,8 @@ function RegressionModal({
     ["p-value (FDR corrected)", pLabel],
     ["Effect size", r.effect_size.toFixed(4)],
     ["N observations", r.n_obs.toString()],
-    ...(r.r_squared !== undefined ? [["R²", r.r_squared.toFixed(4)]] : []),
-    ...(r.aic !== undefined ? [["AIC", r.aic.toFixed(2)]] : []),
+    ...(r.r_squared != null ? [["R\u00B2", r.r_squared.toFixed(4)]] : []),
+    ...(r.aic != null ? [["AIC", r.aic.toFixed(2)]] : []),
     ["Model family", r.model_family],
     ["Assumptions met", r.assumptions_met ? "Yes" : "No"],
   ];
@@ -144,8 +182,6 @@ function RegressionModal({
   );
 
   const handleCopy = () => {
-    if (!tableRef.current) return;
-    // Build plain-text publication table
     const lines = [
       `Regression: ${r.predictor} → ${r.outcome}`,
       `Model: ${r.model_family}`,
@@ -164,6 +200,19 @@ function RegressionModal({
     });
   };
 
+  const handleDownloadPlot = useCallback(() => {
+    const filename = plotMap?.[r.spec_id];
+    if (!filename) return;
+    const link = document.createElement("a");
+    link.href = plotUrl(filename);
+    link.download = `${r.predictor}_${r.model_family.replace(/\s+/g, "_")}.png`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }, [plotMap, r.spec_id, r.predictor, r.model_family]);
+
+  const hasPlotImage = !!plotMap?.[r.spec_id];
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
@@ -180,7 +229,7 @@ function RegressionModal({
                 }`}
               />
               <h3 className="text-sm font-semibold">{r.predictor}</h3>
-              <span className="text-xs text-muted-foreground">→ {r.outcome}</span>
+              <span className="text-xs text-muted-foreground">&rarr; {r.outcome}</span>
             </div>
             <p className="text-xs text-muted-foreground mt-0.5">
               {r.model_family}
@@ -188,6 +237,15 @@ function RegressionModal({
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {hasPlotImage && (
+              <button
+                onClick={handleDownloadPlot}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+              >
+                <Download className="w-3 h-3" />
+                Download plot
+              </button>
+            )}
             <button
               onClick={handleCopy}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
@@ -214,12 +272,14 @@ function RegressionModal({
             <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
               Coefficient &amp; 95% Confidence Interval
             </p>
-            <div className="bg-card border border-border rounded-xl px-2 py-1">
-              <ForestPlot r={r} compact={false} />
+            <div className="bg-card border border-border rounded-xl overflow-hidden">
+              <PlotImage
+                specId={r.spec_id}
+                plotMap={plotMap}
+                regression={r}
+                compact={false}
+              />
             </div>
-            <p className="text-xs text-muted-foreground mt-1 text-center">
-              Point = coefficient · Whiskers = 95% CI · Dashed line = null (0)
-            </p>
           </div>
 
           {/* Stats table */}
@@ -288,8 +348,9 @@ function RegressionModal({
           <div className="bg-accent/50 rounded-xl px-4 py-3">
             <p className="text-xs text-muted-foreground">
               <span className="font-medium text-foreground">Publication note:</span>{" "}
-              Use &quot;Copy table&quot; above to paste tab-separated data into Excel, Word, or any reference manager.
-              The forest plot is generated inline — screenshot or use your browser&apos;s print function to export it.
+              {hasPlotImage
+                ? "Use \"Download plot\" for a 200 DPI publication-ready PNG. Use \"Copy table\" to paste tab-separated data into Excel or Word."
+                : "Use \"Copy table\" above to paste tab-separated data into Excel, Word, or any reference manager."}
             </p>
           </div>
         </div>
@@ -302,67 +363,85 @@ function RegressionModal({
 
 function GridCard({
   r,
+  plotMap,
   onClick,
 }: {
   r: RegressionResult;
+  plotMap?: Record<string, string>;
   onClick: () => void;
 }) {
   const pLabel =
     r.p_value_corrected < 0.001 ? "<0.001" : r.p_value_corrected.toFixed(3);
 
+  const hasPlotImage = !!plotMap?.[r.spec_id];
+
   return (
     <button
       onClick={onClick}
-      className="text-left bg-card border border-border rounded-xl p-4 hover:border-foreground/30 hover:shadow-sm transition-all flex flex-col gap-3"
+      className="text-left bg-card border border-border rounded-xl overflow-hidden hover:border-foreground/30 hover:shadow-sm transition-all flex flex-col"
     >
-      {/* Title row */}
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <div className="flex items-center gap-1.5">
-            <span
-              className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${
-                r.significant_corrected ? "bg-success" : "bg-muted-foreground/30"
-              }`}
-            />
-            <span className="text-sm font-medium leading-tight">{r.predictor}</span>
+      {/* Plot image or fallback */}
+      <div className={hasPlotImage ? "border-b border-border" : "px-4 pt-3"}>
+        {hasPlotImage ? (
+          <img
+            src={plotUrl(plotMap![r.spec_id])}
+            alt={`${r.predictor} → ${r.outcome}`}
+            className="w-full h-auto"
+            loading="lazy"
+          />
+        ) : (
+          <div className="bg-background rounded-lg border border-border px-1">
+            <ForestPlotFallback r={r} compact />
           </div>
-          <p className="text-xs text-muted-foreground mt-0.5 ml-3.5">{r.model_family}</p>
+        )}
+      </div>
+
+      {/* Stats below plot */}
+      <div className="p-4 flex flex-col gap-2.5">
+        {/* Title row */}
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <div className="flex items-center gap-1.5">
+              <span
+                className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${
+                  r.significant_corrected ? "bg-success" : "bg-muted-foreground/30"
+                }`}
+              />
+              <span className="text-sm font-medium leading-tight">{r.predictor}</span>
+            </div>
+            <p className="text-xs text-muted-foreground mt-0.5 ml-3.5">{r.model_family}</p>
+          </div>
+          <span
+            className={`text-xs font-mono px-2 py-0.5 rounded-full flex-shrink-0 ${
+              r.significant_corrected
+                ? "bg-success/10 text-success"
+                : "bg-muted text-muted-foreground"
+            }`}
+          >
+            p={pLabel}
+          </span>
         </div>
-        <span
-          className={`text-xs font-mono px-2 py-0.5 rounded-full flex-shrink-0 ${
-            r.significant_corrected
-              ? "bg-success/10 text-success"
-              : "bg-muted text-muted-foreground"
-          }`}
-        >
-          p={pLabel}
-        </span>
-      </div>
 
-      {/* Forest plot */}
-      <div className="bg-background rounded-lg border border-border px-1">
-        <ForestPlot r={r} compact />
-      </div>
+        {/* Key stats */}
+        <div className="grid grid-cols-3 gap-2">
+          {[
+            ["Coeff", r.coefficient.toFixed(3)],
+            ["Effect", r.effect_size.toFixed(3)],
+            ["N", r.n_obs.toString()],
+          ].map(([label, val]) => (
+            <div key={label} className="bg-accent/60 rounded-lg px-2 py-1.5 text-center">
+              <p className="text-[10px] text-muted-foreground">{label}</p>
+              <p className="text-xs font-mono font-medium">{val}</p>
+            </div>
+          ))}
+        </div>
 
-      {/* Key stats */}
-      <div className="grid grid-cols-3 gap-2">
-        {[
-          ["Coeff", r.coefficient.toFixed(3)],
-          ["Effect", r.effect_size.toFixed(3)],
-          ["N", r.n_obs.toString()],
-        ].map(([label, val]) => (
-          <div key={label} className="bg-accent/60 rounded-lg px-2 py-1.5 text-center">
-            <p className="text-[10px] text-muted-foreground">{label}</p>
-            <p className="text-xs font-mono font-medium">{val}</p>
-          </div>
-        ))}
+        {r.covariates.length > 0 && (
+          <p className="text-[10px] text-muted-foreground truncate">
+            Adjusted for: {r.covariates.join(", ")}
+          </p>
+        )}
       </div>
-
-      {r.covariates.length > 0 && (
-        <p className="text-[10px] text-muted-foreground truncate">
-          Adjusted for: {r.covariates.join(", ")}
-        </p>
-      )}
     </button>
   );
 }
@@ -376,8 +455,8 @@ type SortDir = "asc" | "desc";
 
 export function ResultsPhase() {
   const { results } = useAppState();
-  const [tab, setTab] = useState<"overview" | "regressions">("overview");
-  const [viewMode, setViewMode] = useState<"list" | "grid">("list");
+  const [tab, setTab] = useState<"summary" | "regressions">("regressions");
+  const [viewMode, setViewMode] = useState<"list" | "grid">("grid");
   const [search, setSearch] = useState("");
   const [filterModel, setFilterModel] = useState<string>("all");
   const [filterSig, setFilterSig] = useState<string>("all");
@@ -386,6 +465,8 @@ export function ResultsPhase() {
   const [selectedReg, setSelectedReg] = useState<RegressionResult | null>(null);
 
   if (!results) return null;
+
+  const plotMap = results.plot_map;
 
   const specCurveData = useMemo(() => {
     return results.regressions
@@ -455,10 +536,12 @@ export function ResultsPhase() {
     );
   };
 
+  const hasSpecCurveImage = !!plotMap?.["spec_curve"];
+
   return (
     <>
       {selectedReg && (
-        <RegressionModal r={selectedReg} onClose={() => setSelectedReg(null)} />
+        <RegressionModal r={selectedReg} plotMap={plotMap} onClose={() => setSelectedReg(null)} />
       )}
 
       <div className="flex-1 flex flex-col h-full overflow-hidden">
@@ -508,7 +591,7 @@ export function ResultsPhase() {
         {/* Tabs */}
         <div className="px-6 border-b border-border">
           <div className="flex gap-6">
-            {(["overview", "regressions"] as const).map((t) => (
+            {(["regressions", "summary"] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -518,8 +601,8 @@ export function ResultsPhase() {
                     : "border-transparent text-muted-foreground hover:text-foreground"
                 }`}
               >
-                {t === "overview"
-                  ? "Overview"
+                {t === "summary"
+                  ? "Summary"
                   : `All Regressions (${results.regressions.length})`}
               </button>
             ))}
@@ -528,74 +611,96 @@ export function ResultsPhase() {
 
         {/* Tab Content */}
         <div className="flex-1 overflow-y-auto px-6 py-4">
-          {tab === "overview" ? (
+          {tab === "summary" ? (
             <div className="space-y-6">
-              {/* Summary */}
+              {/* Summary — rendered as markdown */}
               <div className="bg-card border border-border rounded-xl p-6">
                 <h3 className="text-sm font-medium mb-3">AI Summary</h3>
-                <p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap">
-                  {results.summary}
-                </p>
+                <div className="text-sm leading-relaxed">
+                  <Markdown content={results.summary} />
+                </div>
               </div>
 
               {/* Specification Curve */}
               <div className="bg-card border border-border rounded-xl p-6">
                 <h3 className="text-sm font-medium mb-4">Specification Curve</h3>
-                <p className="text-xs text-muted-foreground mb-4">
-                  Each dot is one model specification, sorted by effect size. Green = significant after FDR correction.
-                </p>
-                <ResponsiveContainer width="100%" height={300}>
-                  <ScatterChart margin={{ top: 10, right: 20, bottom: 20, left: 20 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                    <XAxis
-                      dataKey="index"
-                      type="number"
-                      name="Specification"
-                      tick={{ fontSize: 12, fill: "#64748b" }}
-                      label={{
-                        value: "Specification (sorted by effect size)",
-                        position: "bottom",
-                        offset: 5,
-                        style: { fontSize: 11, fill: "#64748b" },
-                      }}
+                {hasSpecCurveImage ? (
+                  <div className="flex flex-col items-center">
+                    <img
+                      src={plotUrl(plotMap!["spec_curve"])}
+                      alt="Specification curve"
+                      className="w-full max-w-3xl h-auto rounded-lg"
                     />
-                    <YAxis
-                      dataKey="coefficient"
-                      type="number"
-                      name="Coefficient"
-                      tick={{ fontSize: 12, fill: "#64748b" }}
-                      label={{
-                        value: "Coefficient",
-                        angle: -90,
-                        position: "insideLeft",
-                        style: { fontSize: 11, fill: "#64748b" },
-                      }}
-                    />
-                    <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="5 5" />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: "#ffffff",
-                        border: "1px solid #e2e8f0",
-                        borderRadius: "8px",
-                        fontSize: "12px",
-                        color: "#09090b",
-                      }}
-                      formatter={(value) => [
-                        typeof value === "number" ? value.toFixed(4) : String(value),
-                      ]}
-                      labelFormatter={() => ""}
-                    />
-                    <Scatter data={specCurveData} name="Specifications">
-                      {specCurveData.map((entry, i) => (
-                        <Cell
-                          key={i}
-                          fill={entry.significant ? "#22c55e" : "#cbd5e1"}
-                          opacity={entry.significant ? 0.9 : 0.5}
+                    <div className="mt-3 flex items-center gap-3">
+                      <a
+                        href={plotUrl(plotMap!["spec_curve"])}
+                        download="specification_curve.png"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                      >
+                        <Download className="w-3 h-3" />
+                        Download plot
+                      </a>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <p className="text-xs text-muted-foreground mb-4">
+                      Each dot is one model specification, sorted by effect size. Green = significant after FDR correction.
+                    </p>
+                    <ResponsiveContainer width="100%" height={300}>
+                      <ScatterChart margin={{ top: 10, right: 20, bottom: 20, left: 20 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                        <XAxis
+                          dataKey="index"
+                          type="number"
+                          name="Specification"
+                          tick={{ fontSize: 12, fill: "#64748b" }}
+                          label={{
+                            value: "Specification (sorted by effect size)",
+                            position: "bottom",
+                            offset: 5,
+                            style: { fontSize: 11, fill: "#64748b" },
+                          }}
                         />
-                      ))}
-                    </Scatter>
-                  </ScatterChart>
-                </ResponsiveContainer>
+                        <YAxis
+                          dataKey="coefficient"
+                          type="number"
+                          name="Coefficient"
+                          tick={{ fontSize: 12, fill: "#64748b" }}
+                          label={{
+                            value: "Coefficient",
+                            angle: -90,
+                            position: "insideLeft",
+                            style: { fontSize: 11, fill: "#64748b" },
+                          }}
+                        />
+                        <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="5 5" />
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: "#ffffff",
+                            border: "1px solid #e2e8f0",
+                            borderRadius: "8px",
+                            fontSize: "12px",
+                            color: "#09090b",
+                          }}
+                          formatter={(value) => [
+                            typeof value === "number" ? value.toFixed(4) : String(value),
+                          ]}
+                          labelFormatter={() => ""}
+                        />
+                        <Scatter data={specCurveData} name="Specifications">
+                          {specCurveData.map((entry, i) => (
+                            <Cell
+                              key={i}
+                              fill={entry.significant ? "#22c55e" : "#cbd5e1"}
+                              opacity={entry.significant ? 0.9 : 0.5}
+                            />
+                          ))}
+                        </Scatter>
+                      </ScatterChart>
+                    </ResponsiveContainer>
+                  </>
+                )}
               </div>
             </div>
           ) : (
@@ -720,7 +825,7 @@ export function ResultsPhase() {
                             {r.model_family}
                           </td>
                           <td className="px-4 py-3 text-muted-foreground text-xs">
-                            {r.covariates.join(", ") || "—"}
+                            {r.covariates.join(", ") || "\u2014"}
                           </td>
                           <td className="px-4 py-3 text-right font-mono text-xs">
                             {r.coefficient.toFixed(4)}
@@ -776,6 +881,7 @@ export function ResultsPhase() {
                         <GridCard
                           key={r.spec_id}
                           r={r}
+                          plotMap={plotMap}
                           onClick={() => setSelectedReg(r)}
                         />
                       ))}

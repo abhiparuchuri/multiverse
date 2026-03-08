@@ -13,9 +13,10 @@ function normalizeMarkdown(md: string): string {
     .replace(/\r\n?/g, "\n")
     .replace(/^[ \t]*[•◦▪‣∙][ \t]+/gm, "- ")
     .replace(/^([ \t]*\d+)\)[ \t]+/gm, "$1. ")
-    // Some model outputs emit a list marker on one line and text on the next:
-    // "-\nItem text" -> "- Item text"
-    .replace(/^([ \t]*(?:[-*+]|[0-9]+\.)[ \t]*)\n([^\n])/gm, "$1$2");
+    // Some model outputs emit list markers on their own line before content:
+    // "-\nItem text" or "1.\n\n  Item text" -> "- Item text" / "1. Item text"
+    .replace(/^([ \t]*\d+\.)[ \t]*\n(?:[ \t]*\n)*[ \t]*/gm, "$1 ")
+    .replace(/^([ \t]*[-*+])[ \t]*\n(?:[ \t]*\n)*[ \t]*/gm, "$1 ");
 }
 
 export function Markdown({ content }: { content: string }) {
