@@ -121,68 +121,64 @@ export function IntentPhase() {
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-        {initializing && (
-          <div className="flex justify-start">
-            <div className="bg-accent rounded-xl px-4 py-3">
+      <div className="flex-1 overflow-y-auto py-6">
+        <div className="max-w-2xl mx-auto px-6 space-y-6">
+          {initializing && (
+            <div className="flex justify-start">
               <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
             </div>
-          </div>
-        )}
-        {messages.map((msg, i) => (
-          <div
-            key={i}
-            className={`flex ${
-              msg.role === "user" ? "justify-end" : "justify-start"
-            }`}
-          >
+          )}
+          {messages.map((msg, i) => (
             <div
-              className={`max-w-[75%] rounded-xl px-4 py-3 text-sm leading-relaxed ${
-                msg.role === "user"
-                  ? "bg-foreground text-background"
-                  : "bg-accent text-foreground"
+              key={i}
+              className={`flex ${
+                msg.role === "user" ? "justify-end" : "justify-start"
               }`}
             >
-              {msg.role === "assistant" ? (
-                <Markdown content={msg.content} />
+              {msg.role === "user" ? (
+                <div className="max-w-[75%] bg-accent rounded-2xl px-4 py-2.5 text-sm leading-relaxed">
+                  <p className="whitespace-pre-wrap">{msg.content}</p>
+                </div>
               ) : (
-                <p className="whitespace-pre-wrap">{msg.content}</p>
+                <div className="w-full text-sm leading-relaxed text-foreground">
+                  <Markdown content={msg.content} />
+                </div>
               )}
             </div>
-          </div>
-        ))}
-        {loading && (
-          <div className="flex justify-start">
-            <div className="bg-accent rounded-xl px-4 py-3">
+          ))}
+          {loading && (
+            <div className="flex justify-start">
               <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
             </div>
-          </div>
-        )}
-        <div ref={messagesEndRef} />
+          )}
+          <div ref={messagesEndRef} />
+        </div>
       </div>
 
-      <div className="border-t border-border p-4">
-        <div className="flex gap-3 max-w-3xl mx-auto">
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-            placeholder="Describe your research question, outcome variable, hypothesized predictors..."
-            className="flex-1 bg-accent rounded-lg px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-          />
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() || loading}
-            className="px-4 py-3 rounded-lg bg-foreground text-background hover:bg-foreground/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            <Send className="w-4 h-4" />
-          </button>
+      <div className="p-4">
+        <div className="max-w-2xl mx-auto">
+          <div className="flex items-center gap-2 bg-accent border border-border rounded-2xl px-4 py-2 focus-within:ring-1 focus-within:ring-ring transition-shadow">
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
+              placeholder="Describe your research question, outcome variable, hypothesized predictors..."
+              className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none py-1"
+            />
+            <button
+              onClick={handleSend}
+              disabled={!input.trim() || loading}
+              className="p-1.5 rounded-lg bg-foreground text-background hover:bg-foreground/90 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+            >
+              <Send className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          {intentReady && (
+            <p className="text-xs text-center text-muted-foreground mt-2">
+              Your study intent is ready. Click &quot;Commit & Run Analysis&quot; to lock it in and begin.
+            </p>
+          )}
         </div>
-        {intentReady && (
-          <p className="text-xs text-center text-muted-foreground mt-2">
-            Your study intent is ready. Click &quot;Commit & Run Analysis&quot; to lock it in and begin.
-          </p>
-        )}
       </div>
     </div>
   );

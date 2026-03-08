@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef } from "react";
 import { useAppState, RegressionResult } from "@/lib/store";
 import {
   BarChart3,
@@ -10,6 +10,11 @@ import {
   Search,
   ChevronDown,
   ChevronUp,
+  LayoutGrid,
+  List,
+  X,
+  Copy,
+  Check,
 } from "lucide-react";
 import {
   ScatterChart,
@@ -21,7 +26,10 @@ import {
   ResponsiveContainer,
   Cell,
   ReferenceLine,
+  ErrorBar,
 } from "recharts";
+
+// ── Stat Card ──────────────────────────────────────────────────────────────
 
 function StatCard({
   label,
@@ -46,17 +54,336 @@ function StatCard({
   );
 }
 
+// ── Forest plot for a single regression ───────────────────────────────────
+
+function ForestPlot({
+  r,
+  compact = false,
+}: {
+  r: RegressionResult;
+  compact?: boolean;
+}) {
+  const data = [
+    {
+      name: r.predictor,
+      coeff: r.coefficient,
+      errorY: [
+        r.coefficient - r.ci_lower,
+        r.ci_upper - r.coefficient,
+      ] as [number, number],
+    },
+  ];
+
+  const absMax = Math.max(
+    Math.abs(r.ci_lower),
+    Math.abs(r.ci_upper),
+    Math.abs(r.coefficient)
+  );
+  const domain: [number, number] = [-absMax * 1.3, absMax * 1.3];
+  const height = compact ? 80 : 120;
+
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <ScatterChart margin={{ top: 10, right: 20, bottom: 5, left: 20 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+        <XAxis
+          dataKey="coeff"
+          type="number"
+          domain={domain}
+          tick={{ fontSize: compact ? 9 : 11, fill: "#64748b" }}
+          tickFormatter={(v) => v.toFixed(2)}
+        />
+        <YAxis hide />
+        <ReferenceLine x={0} stroke="#94a3b8" strokeDasharray="5 5" />
+        <Scatter data={data} fill={r.significant_corrected ? "#22c55e" : "#94a3b8"}>
+          <ErrorBar
+            dataKey="errorY"
+            width={compact ? 4 : 6}
+            strokeWidth={compact ? 1.5 : 2}
+            stroke={r.significant_corrected ? "#22c55e" : "#94a3b8"}
+            direction="x"
+          />
+        </Scatter>
+      </ScatterChart>
+    </ResponsiveContainer>
+  );
+}
+
+// ── Regression Detail Modal ────────────────────────────────────────────────
+
+function RegressionModal({
+  r,
+  onClose,
+}: {
+  r: RegressionResult;
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const tableRef = useRef<HTMLDivElement>(null);
+
+  const pLabel =
+    r.p_value_corrected < 0.001
+      ? "<0.001"
+      : r.p_value_corrected.toFixed(4);
+
+  const statsRows = [
+    ["Coefficient", r.coefficient.toFixed(4)],
+    ["95% CI", `[${r.ci_lower.toFixed(3)}, ${r.ci_upper.toFixed(3)}]`],
+    ["p-value (raw)", r.p_value.toFixed(4)],
+    ["p-value (FDR corrected)", pLabel],
+    ["Effect size", r.effect_size.toFixed(4)],
+    ["N observations", r.n_obs.toString()],
+    ...(r.r_squared !== undefined ? [["R²", r.r_squared.toFixed(4)]] : []),
+    ...(r.aic !== undefined ? [["AIC", r.aic.toFixed(2)]] : []),
+    ["Model family", r.model_family],
+    ["Assumptions met", r.assumptions_met ? "Yes" : "No"],
+  ];
+
+  const assumptionRows = Object.entries(r.assumption_details || {}).map(
+    ([k, v]) => [k.replace(/_/g, " "), String(v)]
+  );
+
+  const handleCopy = () => {
+    if (!tableRef.current) return;
+    // Build plain-text publication table
+    const lines = [
+      `Regression: ${r.predictor} → ${r.outcome}`,
+      `Model: ${r.model_family}`,
+      `Covariates: ${r.covariates.join(", ") || "None"}`,
+      "",
+      "Statistic\tValue",
+      ...statsRows.map(([k, v]) => `${k}\t${v}`),
+    ];
+    if (assumptionRows.length > 0) {
+      lines.push("", "Assumption Checks\tResult");
+      assumptionRows.forEach(([k, v]) => lines.push(`${k}\t${v}`));
+    }
+    navigator.clipboard.writeText(lines.join("\n")).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div className="bg-background border border-border rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-start justify-between px-6 py-4 border-b border-border">
+          <div>
+            <div className="flex items-center gap-2">
+              <span
+                className={`inline-block w-2 h-2 rounded-full ${
+                  r.significant_corrected ? "bg-success" : "bg-muted-foreground/40"
+                }`}
+              />
+              <h3 className="text-sm font-semibold">{r.predictor}</h3>
+              <span className="text-xs text-muted-foreground">→ {r.outcome}</span>
+            </div>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {r.model_family}
+              {r.covariates.length > 0 && ` · adjusted for ${r.covariates.join(", ")}`}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleCopy}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+            >
+              {copied ? (
+                <Check className="w-3 h-3 text-success" />
+              ) : (
+                <Copy className="w-3 h-3" />
+              )}
+              {copied ? "Copied!" : "Copy table"}
+            </button>
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5" ref={tableRef}>
+          {/* Forest plot */}
+          <div>
+            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+              Coefficient &amp; 95% Confidence Interval
+            </p>
+            <div className="bg-card border border-border rounded-xl px-2 py-1">
+              <ForestPlot r={r} compact={false} />
+            </div>
+            <p className="text-xs text-muted-foreground mt-1 text-center">
+              Point = coefficient · Whiskers = 95% CI · Dashed line = null (0)
+            </p>
+          </div>
+
+          {/* Stats table */}
+          <div>
+            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+              Statistics
+            </p>
+            <div className="border border-border rounded-xl overflow-hidden">
+              <table className="w-full text-sm">
+                <tbody>
+                  {statsRows.map(([k, v], i) => (
+                    <tr
+                      key={k}
+                      className={`border-b border-border last:border-0 ${
+                        i % 2 === 0 ? "bg-card" : "bg-background"
+                      }`}
+                    >
+                      <td className="px-4 py-2.5 text-muted-foreground font-medium w-1/2">
+                        {k}
+                      </td>
+                      <td
+                        className={`px-4 py-2.5 font-mono text-right ${
+                          k.includes("p-value") && r.p_value_corrected < 0.05
+                            ? "text-success font-semibold"
+                            : ""
+                        }`}
+                      >
+                        {v}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Assumption details */}
+          {assumptionRows.length > 0 && (
+            <div>
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+                Assumption Checks
+              </p>
+              <div className="border border-border rounded-xl overflow-hidden">
+                <table className="w-full text-sm">
+                  <tbody>
+                    {assumptionRows.map(([k, v], i) => (
+                      <tr
+                        key={k}
+                        className={`border-b border-border last:border-0 ${
+                          i % 2 === 0 ? "bg-card" : "bg-background"
+                        }`}
+                      >
+                        <td className="px-4 py-2.5 text-muted-foreground font-medium capitalize w-1/2">
+                          {k}
+                        </td>
+                        <td className="px-4 py-2.5 font-mono text-right text-xs">{v}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Publication note */}
+          <div className="bg-accent/50 rounded-xl px-4 py-3">
+            <p className="text-xs text-muted-foreground">
+              <span className="font-medium text-foreground">Publication note:</span>{" "}
+              Use &quot;Copy table&quot; above to paste tab-separated data into Excel, Word, or any reference manager.
+              The forest plot is generated inline — screenshot or use your browser&apos;s print function to export it.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Grid card for a single regression ─────────────────────────────────────
+
+function GridCard({
+  r,
+  onClick,
+}: {
+  r: RegressionResult;
+  onClick: () => void;
+}) {
+  const pLabel =
+    r.p_value_corrected < 0.001 ? "<0.001" : r.p_value_corrected.toFixed(3);
+
+  return (
+    <button
+      onClick={onClick}
+      className="text-left bg-card border border-border rounded-xl p-4 hover:border-foreground/30 hover:shadow-sm transition-all flex flex-col gap-3"
+    >
+      {/* Title row */}
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <div className="flex items-center gap-1.5">
+            <span
+              className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${
+                r.significant_corrected ? "bg-success" : "bg-muted-foreground/30"
+              }`}
+            />
+            <span className="text-sm font-medium leading-tight">{r.predictor}</span>
+          </div>
+          <p className="text-xs text-muted-foreground mt-0.5 ml-3.5">{r.model_family}</p>
+        </div>
+        <span
+          className={`text-xs font-mono px-2 py-0.5 rounded-full flex-shrink-0 ${
+            r.significant_corrected
+              ? "bg-success/10 text-success"
+              : "bg-muted text-muted-foreground"
+          }`}
+        >
+          p={pLabel}
+        </span>
+      </div>
+
+      {/* Forest plot */}
+      <div className="bg-background rounded-lg border border-border px-1">
+        <ForestPlot r={r} compact />
+      </div>
+
+      {/* Key stats */}
+      <div className="grid grid-cols-3 gap-2">
+        {[
+          ["Coeff", r.coefficient.toFixed(3)],
+          ["Effect", r.effect_size.toFixed(3)],
+          ["N", r.n_obs.toString()],
+        ].map(([label, val]) => (
+          <div key={label} className="bg-accent/60 rounded-lg px-2 py-1.5 text-center">
+            <p className="text-[10px] text-muted-foreground">{label}</p>
+            <p className="text-xs font-mono font-medium">{val}</p>
+          </div>
+        ))}
+      </div>
+
+      {r.covariates.length > 0 && (
+        <p className="text-[10px] text-muted-foreground truncate">
+          Adjusted for: {r.covariates.join(", ")}
+        </p>
+      )}
+    </button>
+  );
+}
+
+// ── Sort types ─────────────────────────────────────────────────────────────
+
 type SortField = "coefficient" | "p_value" | "effect_size" | "model_family";
 type SortDir = "asc" | "desc";
+
+// ── Main component ─────────────────────────────────────────────────────────
 
 export function ResultsPhase() {
   const { results } = useAppState();
   const [tab, setTab] = useState<"overview" | "regressions">("overview");
+  const [viewMode, setViewMode] = useState<"list" | "grid">("list");
   const [search, setSearch] = useState("");
   const [filterModel, setFilterModel] = useState<string>("all");
   const [filterSig, setFilterSig] = useState<string>("all");
   const [sortField, setSortField] = useState<SortField>("p_value");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [selectedReg, setSelectedReg] = useState<RegressionResult | null>(null);
 
   if (!results) return null;
 
@@ -101,9 +428,7 @@ export function ResultsPhase() {
       const aVal = a[sortField];
       const bVal = b[sortField];
       if (typeof aVal === "string" && typeof bVal === "string") {
-        return sortDir === "asc"
-          ? aVal.localeCompare(bVal)
-          : bVal.localeCompare(aVal);
+        return sortDir === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
       }
       return sortDir === "asc"
         ? (aVal as number) - (bVal as number)
@@ -131,279 +456,337 @@ export function ResultsPhase() {
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden">
-      <div className="border-b border-border px-6 flex items-center h-[57px]">
-        <div>
-          <h2 className="text-sm font-semibold">Results</h2>
-          <p className="text-xs text-muted-foreground">
-            Multiverse analysis of {results.outcome_variable} ({results.outcome_type})
-          </p>
-        </div>
-      </div>
+    <>
+      {selectedReg && (
+        <RegressionModal r={selectedReg} onClose={() => setSelectedReg(null)} />
+      )}
 
-      {/* Stat Cards */}
-      <div className="grid grid-cols-4 gap-4 px-6 py-4">
-        <StatCard
-          label="Robustness"
-          value={`${results.robustness_pct}%`}
-          subtitle="of specs support hypothesis"
-          icon={ShieldCheck}
-        />
-        <StatCard
-          label="Total Specifications"
-          value={results.total_specs.toString()}
-          subtitle={`${results.significant_specs} significant after FDR`}
-          icon={Hash}
-        />
-        <StatCard
-          label="Mean Effect Size"
-          value={results.mean_effect_size.toFixed(3)}
-          subtitle={
-            Math.abs(results.mean_effect_size) < 0.2
-              ? "Small effect"
-              : Math.abs(results.mean_effect_size) < 0.5
-              ? "Medium effect"
-              : "Large effect"
-          }
-          icon={TrendingUp}
-        />
-        <StatCard
-          label="Outcome Type"
-          value={results.outcome_type}
-          subtitle={results.outcome_variable}
-          icon={BarChart3}
-        />
-      </div>
-
-      {/* Tabs */}
-      <div className="px-6 border-b border-border">
-        <div className="flex gap-6">
-          {(["overview", "regressions"] as const).map((t) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`pb-3 text-sm font-medium border-b-2 transition-colors capitalize ${
-                tab === t
-                  ? "border-foreground text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {t === "overview" ? "Overview" : `All Regressions (${results.regressions.length})`}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Tab Content */}
-      <div className="flex-1 overflow-y-auto px-6 py-4">
-        {tab === "overview" ? (
-          <div className="space-y-6">
-            {/* Summary */}
-            <div className="bg-card border border-border rounded-xl p-6">
-              <h3 className="text-sm font-medium mb-3">AI Summary</h3>
-              <p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap">
-                {results.summary}
-              </p>
-            </div>
-
-            {/* Specification Curve */}
-            <div className="bg-card border border-border rounded-xl p-6">
-              <h3 className="text-sm font-medium mb-4">Specification Curve</h3>
-              <p className="text-xs text-muted-foreground mb-4">
-                Each dot is one model specification, sorted by effect size. Green = significant after FDR correction.
-              </p>
-              <ResponsiveContainer width="100%" height={300}>
-                <ScatterChart margin={{ top: 10, right: 20, bottom: 20, left: 20 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                  <XAxis
-                    dataKey="index"
-                    type="number"
-                    name="Specification"
-                    tick={{ fontSize: 12, fill: "#64748b" }}
-                    label={{
-                      value: "Specification (sorted by effect size)",
-                      position: "bottom",
-                      offset: 5,
-                      style: { fontSize: 11, fill: "#64748b" },
-                    }}
-                  />
-                  <YAxis
-                    dataKey="coefficient"
-                    type="number"
-                    name="Coefficient"
-                    tick={{ fontSize: 12, fill: "#64748b" }}
-                    label={{
-                      value: "Coefficient",
-                      angle: -90,
-                      position: "insideLeft",
-                      style: { fontSize: 11, fill: "#64748b" },
-                    }}
-                  />
-                  <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="5 5" />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "#ffffff",
-                      border: "1px solid #e2e8f0",
-                      borderRadius: "8px",
-                      fontSize: "12px",
-                      color: "#09090b",
-                    }}
-                    formatter={(value) => [
-                      typeof value === "number" ? value.toFixed(4) : String(value),
-                    ]}
-                    labelFormatter={() => ""}
-                  />
-                  <Scatter data={specCurveData} name="Specifications">
-                    {specCurveData.map((entry, i) => (
-                      <Cell
-                        key={i}
-                        fill={entry.significant ? "#22c55e" : "#cbd5e1"}
-                        opacity={entry.significant ? 0.9 : 0.5}
-                      />
-                    ))}
-                  </Scatter>
-                </ScatterChart>
-              </ResponsiveContainer>
-            </div>
+      <div className="flex-1 flex flex-col h-full overflow-hidden">
+        <div className="border-b border-border px-6 flex items-center h-[57px]">
+          <div>
+            <h2 className="text-sm font-semibold">Results</h2>
+            <p className="text-xs text-muted-foreground">
+              Multiverse analysis of {results.outcome_variable} ({results.outcome_type})
+            </p>
           </div>
-        ) : (
-          <div className="space-y-4">
-            {/* Filters */}
-            <div className="flex gap-3 items-center">
-              <div className="relative flex-1 max-w-sm">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                <input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search predictors, models..."
-                  className="w-full bg-accent rounded-lg pl-10 pr-4 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-                />
-              </div>
-              <select
-                value={filterModel}
-                onChange={(e) => setFilterModel(e.target.value)}
-                className="bg-accent rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-              >
-                <option value="all">All Models</option>
-                {modelFamilies.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
-              <select
-                value={filterSig}
-                onChange={(e) => setFilterSig(e.target.value)}
-                className="bg-accent rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-              >
-                <option value="all">All Results</option>
-                <option value="significant">Significant Only</option>
-                <option value="not_significant">Not Significant</option>
-              </select>
-            </div>
+        </div>
 
-            {/* Table */}
-            <div className="border border-border rounded-xl overflow-hidden">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-border bg-accent/50">
-                    <th className="text-left px-4 py-3 font-medium text-muted-foreground">
-                      Predictor
-                    </th>
-                    <th
-                      className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                      onClick={() => toggleSort("model_family")}
-                    >
-                      Model
-                      <SortIcon field="model_family" />
-                    </th>
-                    <th className="text-left px-4 py-3 font-medium text-muted-foreground">
-                      Covariates
-                    </th>
-                    <th
-                      className="text-right px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                      onClick={() => toggleSort("coefficient")}
-                    >
-                      Coeff
-                      <SortIcon field="coefficient" />
-                    </th>
-                    <th
-                      className="text-right px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                      onClick={() => toggleSort("p_value")}
-                    >
-                      p-value
-                      <SortIcon field="p_value" />
-                    </th>
-                    <th className="text-right px-4 py-3 font-medium text-muted-foreground">
-                      95% CI
-                    </th>
-                    <th
-                      className="text-right px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
-                      onClick={() => toggleSort("effect_size")}
-                    >
-                      Effect
-                      <SortIcon field="effect_size" />
-                    </th>
-                    <th className="text-center px-4 py-3 font-medium text-muted-foreground">
-                      Sig
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredRegressions.map((r) => (
-                    <tr
-                      key={r.spec_id}
-                      className="border-b border-border last:border-0 hover:bg-accent/30 transition-colors"
-                    >
-                      <td className="px-4 py-3 font-medium">{r.predictor}</td>
-                      <td className="px-4 py-3 text-muted-foreground">
-                        {r.model_family}
-                      </td>
-                      <td className="px-4 py-3 text-muted-foreground text-xs">
-                        {r.covariates.join(", ") || "—"}
-                      </td>
-                      <td className="px-4 py-3 text-right font-mono text-xs">
-                        {r.coefficient.toFixed(4)}
-                      </td>
-                      <td
-                        className={`px-4 py-3 text-right font-mono text-xs ${
-                          r.p_value_corrected < 0.05
-                            ? "text-success"
-                            : "text-muted-foreground"
-                        }`}
-                      >
-                        {r.p_value_corrected < 0.001
-                          ? "<0.001"
-                          : r.p_value_corrected.toFixed(4)}
-                      </td>
-                      <td className="px-4 py-3 text-right font-mono text-xs text-muted-foreground">
-                        [{r.ci_lower.toFixed(3)}, {r.ci_upper.toFixed(3)}]
-                      </td>
-                      <td className="px-4 py-3 text-right font-mono text-xs">
-                        {r.effect_size.toFixed(3)}
-                      </td>
-                      <td className="px-4 py-3 text-center">
-                        <span
-                          className={`inline-block w-2 h-2 rounded-full ${
-                            r.significant_corrected
-                              ? "bg-success"
-                              : "bg-muted-foreground/30"
-                          }`}
+        {/* Stat Cards */}
+        <div className="grid grid-cols-4 gap-4 px-6 py-4">
+          <StatCard
+            label="Robustness"
+            value={`${results.robustness_pct}%`}
+            subtitle="of specs support hypothesis"
+            icon={ShieldCheck}
+          />
+          <StatCard
+            label="Total Specifications"
+            value={results.total_specs.toString()}
+            subtitle={`${results.significant_specs} significant after FDR`}
+            icon={Hash}
+          />
+          <StatCard
+            label="Mean Effect Size"
+            value={results.mean_effect_size.toFixed(3)}
+            subtitle={
+              Math.abs(results.mean_effect_size) < 0.2
+                ? "Small effect"
+                : Math.abs(results.mean_effect_size) < 0.5
+                ? "Medium effect"
+                : "Large effect"
+            }
+            icon={TrendingUp}
+          />
+          <StatCard
+            label="Outcome Type"
+            value={results.outcome_type}
+            subtitle={results.outcome_variable}
+            icon={BarChart3}
+          />
+        </div>
+
+        {/* Tabs */}
+        <div className="px-6 border-b border-border">
+          <div className="flex gap-6">
+            {(["overview", "regressions"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                className={`pb-3 text-sm font-medium border-b-2 transition-colors capitalize ${
+                  tab === t
+                    ? "border-foreground text-foreground"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {t === "overview"
+                  ? "Overview"
+                  : `All Regressions (${results.regressions.length})`}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Tab Content */}
+        <div className="flex-1 overflow-y-auto px-6 py-4">
+          {tab === "overview" ? (
+            <div className="space-y-6">
+              {/* Summary */}
+              <div className="bg-card border border-border rounded-xl p-6">
+                <h3 className="text-sm font-medium mb-3">AI Summary</h3>
+                <p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap">
+                  {results.summary}
+                </p>
+              </div>
+
+              {/* Specification Curve */}
+              <div className="bg-card border border-border rounded-xl p-6">
+                <h3 className="text-sm font-medium mb-4">Specification Curve</h3>
+                <p className="text-xs text-muted-foreground mb-4">
+                  Each dot is one model specification, sorted by effect size. Green = significant after FDR correction.
+                </p>
+                <ResponsiveContainer width="100%" height={300}>
+                  <ScatterChart margin={{ top: 10, right: 20, bottom: 20, left: 20 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                    <XAxis
+                      dataKey="index"
+                      type="number"
+                      name="Specification"
+                      tick={{ fontSize: 12, fill: "#64748b" }}
+                      label={{
+                        value: "Specification (sorted by effect size)",
+                        position: "bottom",
+                        offset: 5,
+                        style: { fontSize: 11, fill: "#64748b" },
+                      }}
+                    />
+                    <YAxis
+                      dataKey="coefficient"
+                      type="number"
+                      name="Coefficient"
+                      tick={{ fontSize: 12, fill: "#64748b" }}
+                      label={{
+                        value: "Coefficient",
+                        angle: -90,
+                        position: "insideLeft",
+                        style: { fontSize: 11, fill: "#64748b" },
+                      }}
+                    />
+                    <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="5 5" />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: "#ffffff",
+                        border: "1px solid #e2e8f0",
+                        borderRadius: "8px",
+                        fontSize: "12px",
+                        color: "#09090b",
+                      }}
+                      formatter={(value) => [
+                        typeof value === "number" ? value.toFixed(4) : String(value),
+                      ]}
+                      labelFormatter={() => ""}
+                    />
+                    <Scatter data={specCurveData} name="Specifications">
+                      {specCurveData.map((entry, i) => (
+                        <Cell
+                          key={i}
+                          fill={entry.significant ? "#22c55e" : "#cbd5e1"}
+                          opacity={entry.significant ? 0.9 : 0.5}
                         />
-                      </td>
-                    </tr>
+                      ))}
+                    </Scatter>
+                  </ScatterChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {/* Filters + view toggle */}
+              <div className="flex gap-3 items-center">
+                <div className="relative flex-1 max-w-sm">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                  <input
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search predictors, models..."
+                    className="w-full bg-accent rounded-lg pl-10 pr-4 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                </div>
+                <select
+                  value={filterModel}
+                  onChange={(e) => setFilterModel(e.target.value)}
+                  className="bg-accent rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  <option value="all">All Models</option>
+                  {modelFamilies.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
                   ))}
-                </tbody>
-              </table>
-              {filteredRegressions.length === 0 && (
-                <div className="px-4 py-8 text-center text-sm text-muted-foreground">
-                  No results match your filters
+                </select>
+                <select
+                  value={filterSig}
+                  onChange={(e) => setFilterSig(e.target.value)}
+                  className="bg-accent rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  <option value="all">All Results</option>
+                  <option value="significant">Significant Only</option>
+                  <option value="not_significant">Not Significant</option>
+                </select>
+
+                {/* View toggle */}
+                <div className="ml-auto flex items-center border border-border rounded-lg overflow-hidden">
+                  <button
+                    onClick={() => setViewMode("list")}
+                    className={`p-2 transition-colors ${
+                      viewMode === "list"
+                        ? "bg-foreground text-background"
+                        : "bg-accent text-muted-foreground hover:text-foreground"
+                    }`}
+                    title="List view"
+                  >
+                    <List className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => setViewMode("grid")}
+                    className={`p-2 transition-colors ${
+                      viewMode === "grid"
+                        ? "bg-foreground text-background"
+                        : "bg-accent text-muted-foreground hover:text-foreground"
+                    }`}
+                    title="Grid view"
+                  >
+                    <LayoutGrid className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* List view */}
+              {viewMode === "list" && (
+                <div className="border border-border rounded-xl overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-border bg-accent/50">
+                        <th className="text-left px-4 py-3 font-medium text-muted-foreground">
+                          Predictor
+                        </th>
+                        <th
+                          className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
+                          onClick={() => toggleSort("model_family")}
+                        >
+                          Model
+                          <SortIcon field="model_family" />
+                        </th>
+                        <th className="text-left px-4 py-3 font-medium text-muted-foreground">
+                          Covariates
+                        </th>
+                        <th
+                          className="text-right px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
+                          onClick={() => toggleSort("coefficient")}
+                        >
+                          Coeff
+                          <SortIcon field="coefficient" />
+                        </th>
+                        <th
+                          className="text-right px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
+                          onClick={() => toggleSort("p_value")}
+                        >
+                          p-value
+                          <SortIcon field="p_value" />
+                        </th>
+                        <th className="text-right px-4 py-3 font-medium text-muted-foreground">
+                          95% CI
+                        </th>
+                        <th
+                          className="text-right px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
+                          onClick={() => toggleSort("effect_size")}
+                        >
+                          Effect
+                          <SortIcon field="effect_size" />
+                        </th>
+                        <th className="text-center px-4 py-3 font-medium text-muted-foreground">
+                          Sig
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredRegressions.map((r) => (
+                        <tr
+                          key={r.spec_id}
+                          onClick={() => setSelectedReg(r)}
+                          className="border-b border-border last:border-0 hover:bg-accent/40 transition-colors cursor-pointer"
+                        >
+                          <td className="px-4 py-3 font-medium">{r.predictor}</td>
+                          <td className="px-4 py-3 text-muted-foreground">
+                            {r.model_family}
+                          </td>
+                          <td className="px-4 py-3 text-muted-foreground text-xs">
+                            {r.covariates.join(", ") || "—"}
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono text-xs">
+                            {r.coefficient.toFixed(4)}
+                          </td>
+                          <td
+                            className={`px-4 py-3 text-right font-mono text-xs ${
+                              r.p_value_corrected < 0.05
+                                ? "text-success"
+                                : "text-muted-foreground"
+                            }`}
+                          >
+                            {r.p_value_corrected < 0.001
+                              ? "<0.001"
+                              : r.p_value_corrected.toFixed(4)}
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono text-xs text-muted-foreground">
+                            [{r.ci_lower.toFixed(3)}, {r.ci_upper.toFixed(3)}]
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono text-xs">
+                            {r.effect_size.toFixed(3)}
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <span
+                              className={`inline-block w-2 h-2 rounded-full ${
+                                r.significant_corrected
+                                  ? "bg-success"
+                                  : "bg-muted-foreground/30"
+                              }`}
+                            />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {filteredRegressions.length === 0 && (
+                    <div className="px-4 py-8 text-center text-sm text-muted-foreground">
+                      No results match your filters
+                    </div>
+                  )}
                 </div>
               )}
+
+              {/* Grid view */}
+              {viewMode === "grid" && (
+                <>
+                  {filteredRegressions.length === 0 ? (
+                    <div className="py-8 text-center text-sm text-muted-foreground">
+                      No results match your filters
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 xl:grid-cols-3 gap-4">
+                      {filteredRegressions.map((r) => (
+                        <GridCard
+                          key={r.spec_id}
+                          r={r}
+                          onClick={() => setSelectedReg(r)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
-    </div>
+    </>
   );
 }

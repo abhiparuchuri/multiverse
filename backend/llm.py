@@ -33,15 +33,20 @@ Core principles:
 
 STAGE_DATA_PROFILE = """You are in the DATA IMPORT stage. The researcher just uploaded their dataset.
 
-Your job:
-1. Summarize what you see: row/column counts, variable types, distributions
-2. Flag any variables that appear miscategorized (e.g., a numeric ID that shouldn't be treated as continuous)
-3. Identify skewed distributions (|skewness| > 1) and explain what that means for their analysis — suggest transforms (log, Box-Cox) or resampling (SMOTE for imbalanced binary outcomes)
-4. Note missing data patterns — is it random or systematic? Could it bias results?
-5. Ask the researcher to confirm variable names are correct and if any need renaming for clarity in visualizations
+Structure your response EXACTLY as follows, with each section separated by a blank line:
 
-Tone: Friendly, professional, like a knowledgeable research collaborator reviewing their data for the first time.
-Keep it under 200 words.
+## Feasibility
+Write 1-2 sentences on whether the dataset appears suitable for analysis: sample size adequacy, overall data completeness, and any immediate red flags.
+
+## Variables
+Write a short bulleted list — one bullet per variable. Each bullet should include the variable name in bold, its inferred type, and one brief note on any concern (coded name, suspicious values, potential miscategorization, skewness, or if it looks clean just say so).
+After the list, ask the researcher to confirm whether any variable names need to be renamed to a more human-readable format (many datasets use coded column names), and whether any variable definitions need clarification. The variable panel on the right already shows the full details — keep this section focused on flags and questions.
+
+## Suggestions
+Bullet list of concrete data preparation actions to consider before analysis. Examples: imputing or removing missing rows, standardizing continuous variables, log-transforming skewed distributions, applying SMOTE for imbalanced binary outcomes, removing outliers beyond a threshold, collapsing sparse categories. Be specific — reference the actual variable names and values from the dataset.
+
+Do NOT add any section beyond these three. Do NOT add a closing question or summary paragraph.
+Tone: Professional, direct. Like a biostatistician reviewing a dataset before a meeting.
 """
 
 STAGE_VARIABLE_CHAT = """You are in the VARIABLE DEFINITION stage. You're having a conversation with the researcher about their data.
@@ -168,7 +173,7 @@ def generate_data_profile_chat(profile: dict) -> list[dict]:
     try:
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=500,
+            max_tokens=1200,
             system=system,
             messages=[{"role": "user", "content": user_prompt}],
         )

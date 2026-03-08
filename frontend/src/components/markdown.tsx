@@ -1,67 +1,106 @@
 "use client";
 
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+/**
+ * Normalize common LLM output patterns into valid markdown so lists and
+ * newlines render reliably.
+ */
+function normalizeMarkdown(md: string): string {
+  // Normalize line endings and Unicode bullet markers into markdown list items.
+  return md
+    .replace(/\r\n?/g, "\n")
+    .replace(/^[ \t]*[•◦▪‣∙][ \t]+/gm, "- ")
+    .replace(/^([ \t]*\d+)\)[ \t]+/gm, "$1. ")
+    // Some model outputs emit a list marker on one line and text on the next:
+    // "-\nItem text" -> "- Item text"
+    .replace(/^([ \t]*(?:[-*+]|[0-9]+\.)[ \t]*)\n([^\n])/gm, "$1$2");
+}
 
 export function Markdown({ content }: { content: string }) {
   return (
+    <div className="prose-chat">
     <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
       components={{
-        p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+        p: ({ children }) => (
+          <p className="mb-2 last:mb-0 leading-relaxed whitespace-pre-wrap">{children}</p>
+        ),
         strong: ({ children }) => (
           <strong className="font-semibold">{children}</strong>
         ),
         em: ({ children }) => <em className="italic">{children}</em>,
-        ul: ({ children }) => (
-          <ul className="list-disc list-inside mb-2 space-y-1">{children}</ul>
-        ),
-        ol: ({ children }) => (
-          <ol className="list-decimal list-inside mb-2 space-y-1">{children}</ol>
-        ),
-        li: ({ children }) => <li>{children}</li>,
+        ul: ({ children }) => <ul>{children}</ul>,
+        ol: ({ children }) => <ol>{children}</ol>,
+        li: ({ children }) => <li className="leading-relaxed whitespace-pre-wrap">{children}</li>,
         code: ({ children, className }) => {
           const isBlock = className?.includes("language-");
           if (isBlock) {
             return (
-              <pre className="bg-background/50 rounded-md px-3 py-2 my-2 overflow-x-auto text-xs">
+              <pre className="bg-background/60 border border-border rounded-lg px-3 py-2.5 my-2 overflow-x-auto text-xs font-mono">
                 <code>{children}</code>
               </pre>
             );
           }
           return (
-            <code className="bg-background/50 rounded px-1.5 py-0.5 text-xs font-mono">
+            <code className="bg-background/60 border border-border rounded px-1.5 py-0.5 text-xs font-mono">
               {children}
             </code>
           );
         },
         h1: ({ children }) => (
-          <h1 className="text-base font-semibold mb-2">{children}</h1>
+          <h1 className="text-base font-bold mb-2 mt-4 first:mt-0 pb-1 border-b border-border/60">
+            {children}
+          </h1>
         ),
         h2: ({ children }) => (
-          <h2 className="text-sm font-semibold mb-1.5">{children}</h2>
+          <h2 className="text-sm font-semibold mb-2 mt-4 first:mt-0 pb-1 border-b border-border/60">
+            {children}
+          </h2>
         ),
         h3: ({ children }) => (
-          <h3 className="text-sm font-medium mb-1">{children}</h3>
+          <h3 className="text-sm font-medium mb-1.5 mt-3 first:mt-0">
+            {children}
+          </h3>
         ),
         blockquote: ({ children }) => (
           <blockquote className="border-l-2 border-muted-foreground/30 pl-3 my-2 text-muted-foreground italic">
             {children}
           </blockquote>
         ),
-        hr: () => <hr className="my-3 border-border" />,
+        hr: () => <hr className="my-4 border-border/60" />,
+        // Wrap table in a scrollable container so wide tables don't overflow the chat bubble
         table: ({ children }) => (
-          <table className="w-full text-xs my-2 border-collapse">{children}</table>
+          <div className="overflow-x-auto my-3 rounded-lg border border-border">
+            <table className="w-full text-xs border-collapse min-w-[400px]">
+              {children}
+            </table>
+          </div>
+        ),
+        thead: ({ children }) => (
+          <thead className="bg-background/60">{children}</thead>
+        ),
+        tbody: ({ children }) => (
+          <tbody className="divide-y divide-border">{children}</tbody>
+        ),
+        tr: ({ children }) => (
+          <tr className="even:bg-background/30 transition-colors">{children}</tr>
         ),
         th: ({ children }) => (
-          <th className="border border-border px-2 py-1 text-left font-medium bg-background/30">
+          <th className="px-3 py-2 text-left font-semibold text-foreground/80 border-b border-border whitespace-nowrap">
             {children}
           </th>
         ),
         td: ({ children }) => (
-          <td className="border border-border px-2 py-1">{children}</td>
+          <td className="px-3 py-2 text-foreground/90 align-top">
+            {children}
+          </td>
         ),
       }}
     >
-      {content}
+      {normalizeMarkdown(content)}
     </ReactMarkdown>
+    </div>
   );
 }
