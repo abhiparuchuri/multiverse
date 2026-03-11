@@ -6,6 +6,7 @@ combinations and reports accuracy, AUC, and feature importances.
 
 import uuid
 import itertools
+import os
 from typing import Optional
 
 import numpy as np
@@ -13,7 +14,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
-from sklearn.model_selection import cross_val_score, StratifiedKFold
+from sklearn.model_selection import cross_validate, StratifiedKFold
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import roc_auc_score
 from sklearn.inspection import permutation_importance
@@ -37,6 +38,13 @@ def _prepare_data(df: pd.DataFrame, outcome: str, features: list[str]):
     if not np.issubdtype(y.dtype, np.number):
         le = LabelEncoder()
         y = le.fit_transform(y)
+    else:
+        # For continuous numeric outcomes, derive a binary target via median split
+        # so classifiers can run consistently across all analyses.
+        unique_count = len(np.unique(y))
+        if unique_count > 10:
+            median_val = float(np.median(y))
+            y = (y > median_val).astype(int)
 
     X = data[features].copy()
     # Encode any categorical features
@@ -113,10 +121,6 @@ def generate_feature_subsets(predictors: list[str], confounders: list[str]) -> l
     """Generate feature subsets similar to regression covariate subsets."""
     subsets = []
 
-    # Each predictor alone
-    for p in predictors:
-        subsets.append([p])
-
     # Each predictor + all confounders
     if confounders:
         for p in predictors:
@@ -162,7 +166,8 @@ def run_classifiers(
     feature_subsets = generate_feature_subsets(predictors, confounders)
     classifiers = _get_classifiers()
     results = []
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    cv_folds = int(os.environ.get("CLASSIFIER_CV_FOLDS", "3") or "3")
+    cv = StratifiedKFold(n_splits=max(2, cv_folds), shuffle=True, random_state=42)
 
     for features in feature_subsets:
         X, y, feat_names = _prepare_data(df, outcome, features)
@@ -174,44 +179,47 @@ def run_classifiers(
         X_scaled = scaler.fit_transform(X)
 
         for clf_name, clf_template in classifiers:
-            # Skip Random Forest for single-feature specs — not meaningful
-            if clf_name == "Random Forest" and len(features) == 1:
-                continue
 
             try:
                 # Clone classifier for fresh fit
                 from sklearn.base import clone
                 clf = clone(clf_template)
 
-                # Cross-validated accuracy
-                acc_scores = cross_val_score(clf, X_scaled, y, cv=cv, scoring="accuracy")
-                accuracy = float(np.mean(acc_scores))
-                accuracy_std = float(np.std(acc_scores))
+                # Single cross-validation pass for all metrics to avoid repeated fitting.
+                cv_scores = cross_validate(
+                    clf,
+                    X_scaled,
+                    y,
+                    cv=cv,
+                    scoring={
+                        "accuracy": "accuracy",
+                        "roc_auc": "roc_auc",
+                        "precision": "precision_weighted",
+                        "recall": "recall_weighted",
+                    },
+                    n_jobs=-1,
+                    error_score=np.nan,
+                )
+                acc_scores = cv_scores.get("test_accuracy", np.array([np.nan]))
+                auc_scores = cv_scores.get("test_roc_auc", np.array([np.nan]))
+                prec_scores = cv_scores.get("test_precision", np.array([np.nan]))
+                recall_scores = cv_scores.get("test_recall", np.array([np.nan]))
 
-                # Cross-validated AUC
-                try:
-                    auc_scores = cross_val_score(clf, X_scaled, y, cv=cv, scoring="roc_auc")
-                    auc = float(np.mean(auc_scores))
-                    auc_std = float(np.std(auc_scores))
-                except Exception:
-                    auc = None
-                    auc_std = None
+                accuracy = float(np.nanmean(acc_scores))
+                accuracy_std = float(np.nanstd(acc_scores))
+                auc_mean = float(np.nanmean(auc_scores))
+                auc = auc_mean if np.isfinite(auc_mean) else None
+                auc_std = float(np.nanstd(auc_scores)) if auc is not None else None
 
                 # Fit on full data for feature importance
                 clf.fit(X_scaled, y)
                 feature_importance = _compute_feature_importance(
                     clf, clf_name, X_scaled, y, feat_names
                 )
-
-                # Precision/recall via cross_val_score
-                try:
-                    prec_scores = cross_val_score(clf, X_scaled, y, cv=cv, scoring="precision_weighted")
-                    recall_scores = cross_val_score(clf, X_scaled, y, cv=cv, scoring="recall_weighted")
-                    precision = float(np.mean(prec_scores))
-                    recall = float(np.mean(recall_scores))
-                except Exception:
-                    precision = None
-                    recall = None
+                precision_mean = float(np.nanmean(prec_scores))
+                recall_mean = float(np.nanmean(recall_scores))
+                precision = precision_mean if np.isfinite(precision_mean) else None
+                recall = recall_mean if np.isfinite(recall_mean) else None
 
                 results.append({
                     "spec_id": str(uuid.uuid4()),

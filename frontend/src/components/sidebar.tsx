@@ -30,7 +30,7 @@ export function Sidebar() {
     <aside className="w-64 border-r border-border bg-sidebar flex flex-col h-screen">
       <div className="px-6 py-4 border-b border-border flex items-center h-[57px]">
         <h1 className="text-lg font-semibold text-foreground tracking-tight">
-          Analyverse
+          Omniverse
         </h1>
       </div>
       <nav className="flex-1 p-4 space-y-1">

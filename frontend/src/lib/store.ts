@@ -32,10 +32,17 @@ export interface ChatMessage {
   content: string;
 }
 
+export interface CovariateRole {
+  variable: string;
+  role: "confounder" | "mediator" | "precision" | "neutral";
+  coeff_change_pct: number;
+}
+
 export interface RegressionResult {
   spec_id: string;
   model_family: string;
   covariates: string[];
+  covariate_roles?: CovariateRole[];
   outcome: string;
   predictor: string;
   coefficient: number;

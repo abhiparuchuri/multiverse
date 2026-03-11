@@ -3,7 +3,7 @@ import "./globals.css";
 import { AppProvider } from "@/components/providers";
 
 export const metadata: Metadata = {
-  title: "Multiverse — Analysis Validation",
+  title: "Omniverse — Analysis Validation",
   description: "Clinical research analysis validation platform",
 };
 

@@ -419,10 +419,28 @@ def generate_dag_plot(
     predictors: list[str],
     covariates: list[str],
     spec_id: str,
+    covariate_roles: list = None,
 ) -> str:
     """Generate a publication-ready DAG showing predictor→outcome and covariate→outcome
-    relationships for a single analysis specification. Returns the filename."""
+    relationships with causal role classification. Returns the filename.
+
+    covariate_roles: list of {"variable": str, "role": str, "coeff_change_pct": float}
+    """
     from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+
+    # Build role lookup from classification results
+    role_map = {}
+    if covariate_roles:
+        for cr in covariate_roles:
+            role_map[cr["variable"]] = cr
+
+    # Role → visual style
+    ROLE_STYLES = {
+        "confounder": {"face": "#ea580c", "edge": "#c2410c", "arrow": "#ea580c", "label": "Confounder"},
+        "mediator":   {"face": "#2563eb", "edge": "#1d4ed8", "arrow": "#2563eb", "label": "Mediator"},
+        "precision":  {"face": "#64748b", "edge": "#475569", "arrow": "#94a3b8", "label": "Precision"},
+        "neutral":    {"face": "#64748b", "edge": "#475569", "arrow": "#94a3b8", "label": "Neutral"},
+    }
 
     all_left = predictors + covariates
     n_left = len(all_left)
@@ -466,54 +484,100 @@ def generate_dag_plot(
     )
 
     # Draw left-side nodes and arrows
-    for i, (var, y) in enumerate(zip(all_left, left_ys)):
+    for i, (var, y_pos) in enumerate(zip(all_left, left_ys)):
         is_predictor = var in predictors
-        face = "#16a34a" if is_predictor else "#64748b"
-        edge = "#15803d" if is_predictor else "#475569"
+
+        if is_predictor:
+            face, edge = "#16a34a", "#15803d"
+            arrow_color = "#16a34a"
+            lw = 1.8
+            linestyle = "-"
+        else:
+            role_info = role_map.get(var, {})
+            role = role_info.get("role", "neutral")
+            style = ROLE_STYLES.get(role, ROLE_STYLES["neutral"])
+            face, edge = style["face"], style["edge"]
+            arrow_color = style["arrow"]
+            lw = 1.5 if role in ("confounder", "mediator") else 1.2
+            linestyle = "-" if role in ("confounder", "mediator") else "--"
 
         rect = FancyBboxPatch(
-            (left_x, y - node_h / 2), node_w, node_h,
+            (left_x, y_pos - node_h / 2), node_w, node_h,
             boxstyle="round,pad=0.1", facecolor=face, edgecolor=edge,
             linewidth=1.5, alpha=0.9, zorder=3,
         )
         ax.add_patch(rect)
         ax.text(
-            left_x + node_w / 2, y, var,
+            left_x + node_w / 2, y_pos, var,
             ha="center", va="center", fontsize=9, fontweight="600",
             color="white", zorder=4,
         )
 
         # Arrow from left node to outcome
-        arrow_color = "#16a34a" if is_predictor else "#94a3b8"
-        arrow_style = "->" if is_predictor else "->"
-        lw = 1.8 if is_predictor else 1.2
         arrow = FancyArrowPatch(
-            (left_x + node_w + 0.05, y),
+            (left_x + node_w + 0.05, y_pos),
             (right_x - 0.05, outcome_cy),
             arrowstyle="-|>",
             mutation_scale=14,
             color=arrow_color,
             linewidth=lw,
-            linestyle="-" if is_predictor else "--",
+            linestyle=linestyle,
             zorder=2,
             connectionstyle="arc3,rad=0",
         )
         ax.add_patch(arrow)
 
-    # Legend
+        # Annotate covariate arrows with role + coefficient change %
+        if not is_predictor:
+            role_info = role_map.get(var, {})
+            role = role_info.get("role", "neutral")
+            pct = role_info.get("coeff_change_pct", 0.0)
+            style = ROLE_STYLES.get(role, ROLE_STYLES["neutral"])
+
+            if role in ("confounder", "mediator") and abs(pct) > 0:
+                label_text = f"{style['label']} ({pct:+.0f}%)"
+            elif role == "precision":
+                label_text = style["label"]
+            else:
+                label_text = ""
+
+            if label_text:
+                mid_x = (left_x + node_w + right_x) / 2
+                mid_y = (y_pos + outcome_cy) / 2
+                ax.text(
+                    mid_x, mid_y + 0.18, label_text,
+                    ha="center", va="bottom", fontsize=6.5,
+                    color=arrow_color, fontstyle="italic", zorder=5,
+                )
+
+    # Legend — include only roles that appear
     from matplotlib.lines import Line2D
     legend_items = [
         Line2D([0], [0], marker="s", color="w", markerfacecolor="#16a34a",
                markersize=8, label="Predictor"),
-        Line2D([0], [0], marker="s", color="w", markerfacecolor="#64748b",
-               markersize=8, label="Covariate"),
+    ]
+    seen_roles = set()
+    for var in covariates:
+        role_info = role_map.get(var, {})
+        role = role_info.get("role", "neutral")
+        seen_roles.add(role)
+
+    for role_key in ["confounder", "mediator", "precision", "neutral"]:
+        if role_key in seen_roles:
+            style = ROLE_STYLES[role_key]
+            legend_items.append(
+                Line2D([0], [0], marker="s", color="w", markerfacecolor=style["face"],
+                       markersize=8, label=style["label"]),
+            )
+
+    legend_items.append(
         Line2D([0], [0], marker="s", color="w", markerfacecolor="#8b5cf6",
                markersize=8, label="Outcome"),
-    ]
+    )
     ax.legend(
-        handles=legend_items, loc="lower center", fontsize=8,
+        handles=legend_items, loc="lower center", fontsize=7,
         frameon=True, fancybox=True, framealpha=0.9,
-        edgecolor=COLOR_GRID, ncol=3,
+        edgecolor=COLOR_GRID, ncol=min(len(legend_items), 5),
         bbox_to_anchor=(0.5, -0.02),
     )
 
@@ -527,14 +591,25 @@ def generate_dag_plot(
 def generate_all_plots(results: dict, df: Optional[pd.DataFrame] = None) -> dict:
     """Generate all plots for the analysis results.
     Returns a dict mapping spec_id -> plot filename, plus 'spec_curve' key."""
-    # Clear previous plots
-    for f in PLOT_DIR.glob("*.png"):
-        f.unlink()
-
     plot_map = {}
+    regressions = list(results.get("regressions", []))
+    max_regression_plots = int(os.environ.get("ANALYSIS_MAX_REGRESSION_PLOTS", "0") or "0")
+    max_dag_plots = int(os.environ.get("ANALYSIS_MAX_DAG_PLOTS", "0") or "0")
+
+    # Prioritize significant specs and low corrected p-values for eager plotting.
+    ranked = sorted(
+        regressions,
+        key=lambda r: (
+            0 if r.get("significant_corrected") else 1,
+            float(r.get("p_value_corrected", 1.0)),
+            -abs(float(r.get("coefficient", 0.0))),
+        ),
+    )
+    plot_regs = ranked[:max_regression_plots] if max_regression_plots > 0 else ranked
+    dag_regs = ranked[:max_dag_plots] if max_dag_plots > 0 else ranked
 
     # Individual regression plots (scatter + model overlay when data is available)
-    for reg in results.get("regressions", []):
+    for reg in plot_regs:
         try:
             if df is not None:
                 filename = generate_scatter_model_plot(df, reg)
@@ -551,13 +626,14 @@ def generate_all_plots(results: dict, df: Optional[pd.DataFrame] = None) -> dict
 
     # DAG plots for each regression
     dag_map = {}
-    for reg in results.get("regressions", []):
+    for reg in dag_regs:
         try:
             dag_file = generate_dag_plot(
                 outcome=reg["outcome"],
                 predictors=[reg["predictor"]],
                 covariates=reg.get("covariates", []),
                 spec_id=reg["spec_id"],
+                covariate_roles=reg.get("covariate_roles", []),
             )
             dag_map[reg["spec_id"]] = dag_file
         except Exception as e:

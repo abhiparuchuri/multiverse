@@ -8,11 +8,13 @@ and assumption check results.
 
 import uuid
 import itertools
+import os
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 from scipy import stats
+from covariate_roles import classify_covariates
 from scipy.special import boxcox as boxcox_transform
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
@@ -346,27 +348,34 @@ def run_multiverse_analysis(
 
     # Generate covariate subsets
     covariate_sets = generate_covariate_subsets(predictors, confounders)
+    max_cov_sets = int(os.environ.get("ANALYSIS_MAX_COVARIATE_SETS", "0") or "0")
+    if max_cov_sets > 0 and len(covariate_sets) > max_cov_sets:
+        covariate_sets = sorted(covariate_sets, key=lambda s: (len(s), tuple(s)))[:max_cov_sets]
 
     all_results = []
 
     for cov_set in covariate_sets:
         # Determine the primary predictor(s) in this set
         preds_in_set = [p for p in cov_set if p in predictors]
-        controls_in_set = [c for c in cov_set if c in confounders]
 
         if not preds_in_set:
             continue
 
         X_cols = cov_set
         X = working_df[X_cols].values.astype(float)
+        continuous_assumptions = None
+        binary_assumptions = None
+        if outcome_type == "continuous":
+            continuous_assumptions = check_continuous_assumptions(y, X)
+        elif outcome_type == "binary":
+            binary_assumptions = check_binary_assumptions(y, X)
 
         for pred in preds_in_set:
             pred_idx = X_cols.index(pred)
             covariates_label = [c for c in X_cols if c != pred]
 
             if outcome_type == "continuous":
-                # Check assumptions
-                assumptions = check_continuous_assumptions(y, X)
+                assumptions = continuous_assumptions or {"all_met": False}
 
                 # === Models when assumptions hold ===
                 # OLS
@@ -460,7 +469,7 @@ def run_multiverse_analysis(
                         pass
 
             elif outcome_type == "binary":
-                assumptions = check_binary_assumptions(y, X)
+                assumptions = binary_assumptions or {"all_met": False}
 
                 # Logistic regression
                 log_result = run_logistic(y, X, pred_idx)
@@ -529,6 +538,22 @@ def run_multiverse_analysis(
             r["effect_size"] = r2 / (1 - r2) if r2 < 1 else 0
         else:
             r["effect_size"] = abs(r.get("coefficient", 0))
+
+    # Classify covariate roles for each unique predictor/covariate set once.
+    covariate_role_cache: dict[tuple[str, tuple[str, ...]], list] = {}
+    for r in all_results:
+        try:
+            cache_key = (r["predictor"], tuple(sorted(r["covariates"])))
+            if cache_key not in covariate_role_cache:
+                covariate_role_cache[cache_key] = classify_covariates(
+                    working_df,
+                    outcome=outcome,
+                    predictor=r["predictor"],
+                    covariates=r["covariates"],
+                )
+            r["covariate_roles"] = covariate_role_cache[cache_key]
+        except Exception:
+            r["covariate_roles"] = []
 
     # Compute summary stats
     sig_count = sum(1 for r in all_results if r["significant_corrected"])

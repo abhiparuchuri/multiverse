@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo, useRef, useCallback, useEffect } from "react";
-import { useAppState, RegressionResult, ClassifierResult, DistributionStat, ChatMessage } from "@/lib/store";
+import { useAppState, RegressionResult, CovariateRole, ClassifierResult, DistributionStat, ChatMessage } from "@/lib/store";
 import { sendResultsChatStream } from "@/lib/api";
 import {
   Search,
@@ -371,6 +371,58 @@ function RegressionModal({
                   </tbody>
                 </table>
               </div>
+            </div>
+          )}
+
+          {/* Covariate Roles */}
+          {r.covariate_roles && r.covariate_roles.length > 0 && (
+            <div>
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+                Covariate Classification
+              </p>
+              <div className="border border-border rounded-xl overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border bg-accent/30">
+                      <th className="text-left px-4 py-2 font-medium text-muted-foreground text-xs">Variable</th>
+                      <th className="text-left px-4 py-2 font-medium text-muted-foreground text-xs">Role</th>
+                      <th className="text-right px-4 py-2 font-medium text-muted-foreground text-xs">Coeff. Change</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {r.covariate_roles.map((cr: CovariateRole) => {
+                      const roleColors: Record<string, string> = {
+                        confounder: "text-orange-500",
+                        mediator: "text-blue-500",
+                        precision: "text-muted-foreground",
+                        neutral: "text-muted-foreground",
+                      };
+                      const roleBg: Record<string, string> = {
+                        confounder: "bg-orange-500/10",
+                        mediator: "bg-blue-500/10",
+                        precision: "bg-accent",
+                        neutral: "bg-accent",
+                      };
+                      return (
+                        <tr key={cr.variable} className="border-b border-border last:border-0">
+                          <td className="px-4 py-2 font-medium text-xs">{cr.variable}</td>
+                          <td className="px-4 py-2">
+                            <span className={`text-xs font-medium capitalize px-2 py-0.5 rounded-full ${roleColors[cr.role]} ${roleBg[cr.role]}`}>
+                              {cr.role}
+                            </span>
+                          </td>
+                          <td className={`px-4 py-2 text-right font-mono text-xs ${Math.abs(cr.coeff_change_pct) >= 10 ? (roleColors[cr.role] || "") : "text-muted-foreground"}`}>
+                            {cr.coeff_change_pct > 0 ? "+" : ""}{cr.coeff_change_pct.toFixed(1)}%
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-[10px] text-muted-foreground mt-1.5 leading-relaxed">
+                Classification uses the change-in-estimate method. Covariates that shift the predictor coefficient by &ge;10% are classified as confounders or mediators based on their correlation pattern.
+              </p>
             </div>
           )}
 
@@ -796,14 +848,6 @@ function ClassifiersTab({
       return matchSearch && matchModel;
     });
   }, [classifierResults, clfSearch, clfFilterModel]);
-
-  if (outcomeType !== "binary") {
-    return (
-      <div className="flex-1 flex items-center justify-center">
-        <p className="text-sm text-muted-foreground">Classifiers are available for binary outcomes only.</p>
-      </div>
-    );
-  }
 
   if (classifierResults.length === 0) {
     return (

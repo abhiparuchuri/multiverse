@@ -1,9 +1,11 @@
 import uuid
 import io
+import os
 import re
 import json
 import asyncio
 import traceback
+import math
 from typing import Optional
 
 import numpy as np
@@ -17,10 +19,15 @@ from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
-from analysis_engine import run_multiverse_analysis
-from classifier_engine import run_classifiers
 from llm import generate_data_profile_chat, generate_chat_response, generate_intent_chat, extract_intent_from_conversation, stream_results_chat, stream_intent_chat, stream_chat_response
-from plot_generator import generate_all_plots, generate_feature_importance_plot, generate_distribution_plot, generate_dag_plot, PLOT_DIR
+from modal_client import (
+    run_analysis,
+    run_classifiers_call,
+    generate_all_plots_call,
+    generate_classifier_artifacts_call,
+    generate_distribution_plots_call,
+    PLOT_DIR,
+)
 
 app = FastAPI(title="Multiverse API")
 
@@ -59,6 +66,36 @@ class UpdateVariableRequest(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     session_id: str
+
+
+def _to_json_safe(value):
+    """Recursively convert numpy/pandas scalars and containers to JSON-safe values."""
+    if isinstance(value, dict):
+        return {str(k): _to_json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_to_json_safe(v) for v in value]
+    if isinstance(value, tuple):
+        return [_to_json_safe(v) for v in value]
+    if isinstance(value, set):
+        return [_to_json_safe(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return [_to_json_safe(v) for v in value.tolist()]
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        f = float(value)
+        return f if math.isfinite(f) else None
+    if isinstance(value, np.datetime64):
+        return pd.Timestamp(value).isoformat()
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if value is pd.NA:
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
 
 
 def profile_column(series: pd.Series) -> dict:
@@ -712,7 +749,7 @@ async def analyze(request: AnalyzeRequest):
     df = session["df"]
 
     try:
-        results = run_multiverse_analysis(
+        results = run_analysis(
             df=df,
             outcome=intent["outcome_variable"],
             predictors=intent["predictors"],
@@ -720,13 +757,9 @@ async def analyze(request: AnalyzeRequest):
             hypothesis=intent.get("hypothesis", ""),
         )
 
-        # Store results for results-chat
-        session["results"] = results
-        results["session_id"] = request.session_id
-
         # Generate publication-ready regression plots + DAGs
         try:
-            plot_map, dag_map = generate_all_plots(results, df=session["df"])
+            plot_map, dag_map = generate_all_plots_call(results, df=session["df"])
             results["plot_map"] = plot_map
             results["dag_map"] = dag_map
         except Exception as plot_err:
@@ -734,11 +767,11 @@ async def analyze(request: AnalyzeRequest):
             results["plot_map"] = {}
             results["dag_map"] = {}
 
-        # Run classifiers (for binary outcomes)
-        outcome_type = results.get("outcome_type", "continuous")
-        if outcome_type == "binary":
+        # Run classifiers (for all outcomes when enabled)
+        enable_classifiers = os.environ.get("ANALYSIS_ENABLE_CLASSIFIERS", "1").strip().lower() in ("1", "true", "yes")
+        if enable_classifiers:
             try:
-                clf_results = run_classifiers(
+                clf_results = run_classifiers_call(
                     df=df,
                     outcome=intent["outcome_variable"],
                     predictors=intent["predictors"],
@@ -753,31 +786,15 @@ async def analyze(request: AnalyzeRequest):
                     "mean_auc": clf_results.get("mean_auc"),
                 }
 
-                # Generate feature importance plots
-                clf_plot_map = {}
-                for cr in results["classifier_results"]:
-                    try:
-                        fname = generate_feature_importance_plot(cr)
-                        clf_plot_map[cr["spec_id"]] = fname
-                    except Exception as e:
-                        print(f"Classifier plot failed: {e}")
-                results["classifier_plot_map"] = clf_plot_map
-
-                # Generate DAG plots for each classifier spec
-                clf_dag_map = {}
-                for cr in results["classifier_results"]:
-                    try:
-                        dag_fname = generate_dag_plot(
-                            outcome=intent["outcome_variable"],
-                            predictors=cr.get("predictors_used", []),
-                            covariates=cr.get("covariates_used", []),
-                            spec_id=f"clf_{cr['spec_id']}",
-                        )
-                        clf_dag_map[cr["spec_id"]] = dag_fname
-                    except Exception as e:
-                        print(f"Classifier DAG failed: {e}")
+                # Batch-generate classifier artifacts (single remote call when USE_MODAL=1).
+                clf_plot_map, clf_dag_map = generate_classifier_artifacts_call(
+                    results["classifier_results"],
+                    intent["outcome_variable"],
+                )
                 results["classifier_dag_map"] = clf_dag_map
+                results["classifier_plot_map"] = clf_plot_map
             except Exception as clf_err:
+                traceback.print_exc()
                 print(f"Classifier analysis failed: {clf_err}")
                 results["classifier_results"] = []
                 results["classifier_summary"] = {}
@@ -789,20 +806,28 @@ async def analyze(request: AnalyzeRequest):
             results["classifier_plot_map"] = {}
             results["classifier_dag_map"] = {}
 
-        # Generate distribution plots for all analysis variables
+        # Generate distribution plots for all analysis variables (batched).
         try:
-            dist_plot_map = {}
-            outcome_var = intent["outcome_variable"]
-            dist_plot_map[outcome_var] = generate_distribution_plot(df, outcome_var, "outcome")
+            variable_roles = [{"col_name": intent["outcome_variable"], "role": "outcome"}]
+            variable_roles.extend(
+                {"col_name": p, "role": "predictor"} for p in intent["predictors"] if p in df.columns
+            )
+            variable_roles.extend(
+                {"col_name": c, "role": "covariate"}
+                for c in intent["confounders"]
+                if c in df.columns and c != intent["outcome_variable"] and c not in intent["predictors"]
+            )
+            # Deduplicate while preserving order.
+            seen_cols = set()
+            deduped_variable_roles = []
+            for item in variable_roles:
+                col = item["col_name"]
+                if col in seen_cols:
+                    continue
+                seen_cols.add(col)
+                deduped_variable_roles.append(item)
 
-            for p in intent["predictors"]:
-                if p in df.columns:
-                    dist_plot_map[p] = generate_distribution_plot(df, p, "predictor")
-
-            for c in intent["confounders"]:
-                if c in df.columns and c not in dist_plot_map:
-                    dist_plot_map[c] = generate_distribution_plot(df, c, "covariate")
-
+            dist_plot_map = generate_distribution_plots_call(df, deduped_variable_roles)
             results["distribution_plot_map"] = dist_plot_map
         except Exception as dist_err:
             print(f"Distribution plot generation failed: {dist_err}")
@@ -842,10 +867,18 @@ async def analyze(request: AnalyzeRequest):
         except Exception as stat_err:
             print(f"Distribution stats failed: {stat_err}")
 
+        results["session_id"] = request.session_id
+        results = _to_json_safe(results)
+        session["results"] = results
         return results
     except Exception as e:
         traceback.print_exc()
         return {"error": str(e)}
+
+
+@app.get("/sessions")
+async def list_sessions():
+    return {sid: {"has_results": "results" in s, "clf_count": len((s.get("results") or {}).get("classifier_results") or [])} for sid, s in sessions.items()}
 
 
 @app.get("/results/{session_id}")

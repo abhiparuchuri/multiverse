@@ -6,18 +6,27 @@ import { runAnalysis } from "@/lib/api";
 import { Loader2 } from "lucide-react";
 
 const STEPS = [
+  "Preparing data matrix...",
+  "Detecting outcome type...",
   "Checking assumptions...",
   "Testing normality (Shapiro-Wilk)...",
   "Checking homoscedasticity (Breusch-Pagan)...",
+  "Evaluating residual linearity...",
   "Computing VIF for multicollinearity...",
+  "Generating covariate subsets...",
   "Running OLS regressions...",
-  "Running penalized regressions (Lasso, Ridge)...",
-  "Running logistic models...",
+  "Running penalized regressions (Lasso, Ridge, Elastic Net)...",
+  "Fitting logistic models...",
   "Computing effect measures (OR, RR, RD)...",
   "Applying transforms for violated assumptions...",
-  "Applying FDR correction...",
-  "Aggregating multiverse results...",
-  "Generating summary with AI...",
+  "Running robust and quantile regressions...",
+  "Applying FDR correction across specifications...",
+  "Classifying covariate roles (change-in-estimate)...",
+  "Generating forest plots...",
+  "Constructing DAGs...",
+  "Computing specification curve...",
+  "Building distribution plots...",
+  "Finalizing results...",
 ];
 
 export function AnalysisPhase() {
@@ -34,7 +43,7 @@ export function AnalysisPhase() {
   useEffect(() => {
     const interval = setInterval(() => {
       setStepIdx((prev) => (prev < STEPS.length - 1 ? prev + 1 : prev));
-    }, 1800);
+    }, 2400);
     return () => clearInterval(interval);
   }, []);
 
